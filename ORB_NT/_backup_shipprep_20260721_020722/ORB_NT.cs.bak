@@ -125,14 +125,22 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
     {
         private int totalTrades = 0;
         private int fastTrades = 0;
+        private double totalProfit = 0;
+        private double fastProfit = 0;
 
+        public int TotalTrades => totalTrades;
         public double FastTradePct { get; private set; }
+        public bool IsFastTradeWarning => FastTradePct > 45.0; // warn at 45%
 
         public void RecordTrade(double holdSeconds, double pnl)
         {
             totalTrades++;
-            if (holdSeconds < 10.0) fastTrades++;
-            FastTradePct = ((double)fastTrades / totalTrades) * 100.0;
+            totalProfit += pnl;
+            bool isFast = holdSeconds < 10.0;
+            if (isFast) { fastTrades++; fastProfit += pnl; }
+
+            if (totalTrades > 0)
+                FastTradePct = ((double)fastTrades / totalTrades) * 100.0;
         }
     }
 

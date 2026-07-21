@@ -9,6 +9,7 @@ using NinjaTrader.Gui;
 using NinjaTrader.Gui.Chart;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Indicators;
 using NinjaTrader.NinjaScript.Strategies;
 
 // ============================================================================
@@ -1274,7 +1275,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 slot.RangeHigh == double.MinValue || slot.RangeLow == double.MaxValue ||
                 slot.RangeHigh <= slot.RangeLow) return false;
             if (News_Guard_Mode != NewsGuardMode.Off &&
-                newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins, News_Guard_Mode)) return false;
+                newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins)) return false;
             return true;
         }
 
@@ -1476,7 +1477,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         {
             bool newsOn = News_Guard_Mode != NewsGuardMode.Off;
 
-            if (newsOn && News_Flatten_Before && newsEngine.IsNewsFlattening(currentUTC, News_Block_Before_Mins, News_Guard_Mode))
+            if (newsOn && News_Flatten_Before && newsEngine.IsNewsFlattening(currentUTC, News_Block_Before_Mins))
             {
                 for (int s = 0; s < SLOT_COUNT; s++)
                 {
@@ -1490,7 +1491,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             }
 
             bool strictActive = newsOn && News_Cancel_Pending
-                && newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins, News_Guard_Mode);
+                && newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins);
 
             if (strictActive)
             {
@@ -1853,7 +1854,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             // everything — live inputs are never consulted after the fill.
             if (trade.SnapBehavior == 2) return; // Off
 
-            if (News_Freeze_Trail && newsEngine.IsNewsFreezingTrail(currentUTC, News_Block_Before_Mins, News_Block_After_Mins, News_Guard_Mode))
+            if (News_Freeze_Trail && newsEngine.IsNewsFreezingTrail(currentUTC, News_Block_Before_Mins, News_Block_After_Mins))
                 return;
 
             double newSL = ORB_Execution.ComputeTrailTarget(trade, bid, ask, TickSize, currentUTC);
@@ -2166,6 +2167,8 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             else if (dispSlot >= 0) status = primary.Phase.ToString();
             else status = "No sessions enabled";
 
+            bool anyHtf = slots[3].IsEnabled || slots[4].IsEnabled || slots[5].IsEnabled;
+            string htfMode = slots[3].IsEnabled ? "Daily" : slots[4].IsEnabled ? "Weekly" : slots[5].IsEnabled ? "Monthly" : "-";
 
             // Range display source: the display slot when its range is valid,
             // else the MOST RECENTLY formed/locked range across all slots —
@@ -2228,6 +2231,9 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 CutoffText = cutoffText,
                 RangeHigh = rangeSrc != null ? rangeSrc.RangeHigh : 0,
                 RangeLow = rangeSrc != null ? rangeSrc.RangeLow : 0,
+                Slot1Active = dispSlot >= 0 && dispLive,
+                Slot2Active = anyHtf,
+                Slot2Mode = htfMode,
                 SlotsIntraday = intradaySb.ToString(),
                 SlotsHtf = htfSb.ToString(),
 
@@ -2247,8 +2253,8 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 PointSize = PointSize,
                 PointValue = Instrument.MasterInstrument.PointValue,
 
-                NewsBlackoutActive = News_Guard_Mode != NewsGuardMode.Off && newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins, News_Guard_Mode),
-                NextNewsEvent = newsEngine.GetNextEventDescription(currentUTC, News_Guard_Mode),
+                NewsBlackoutActive = News_Guard_Mode != NewsGuardMode.Off && newsEngine.IsNewsBlocked(currentUTC, News_Block_Before_Mins, News_Block_After_Mins),
+                NextNewsEvent = newsEngine.GetNextEventDescription(currentUTC),
                 NewsSourceMode = "Live (FF)"
             };
 

@@ -31,6 +31,9 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         public string CutoffText;      // live session cutoff ("NY · 01:22:20"), null/"--" = hide row
         public double RangeHigh;
         public double RangeLow;
+        public bool Slot1Active;
+        public bool Slot2Active;
+        public string Slot2Mode;
         public string SlotsIntraday;   // "NY · London · Asian" (enabled intraday slots)
         public string SlotsHtf;        // "Daily · Weekly" (enabled HTF slots), "" = hide row
 

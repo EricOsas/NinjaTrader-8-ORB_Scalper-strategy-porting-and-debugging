@@ -184,6 +184,14 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             }
         }
 
+        public static void RemoveTradeTool(Strategy strategy, string tagBase)
+        {
+            strategy.RemoveDrawObject(tagBase + "_ENT");
+            strategy.RemoveDrawObject(tagBase + "_SL");
+            strategy.RemoveDrawObject(tagBase + "_TP");
+            strategy.RemoveDrawObject(tagBase + "_TRAIL");
+        }
+
         //----------------------------------------------------------------------
         // Pending level line: dashed, range end → now (updated per pulse)
         //----------------------------------------------------------------------
@@ -192,6 +200,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         {
             DrawBoundedLine(strategy, tag, fromTime, price, toTime, price,
                 ClrEntryLine, DashStyleHelper.Dash, 1);
+        }
+
+        public static void RemoveObject(Strategy strategy, string tag)
+        {
+            strategy.RemoveDrawObject(tag);
         }
 
         //----------------------------------------------------------------------

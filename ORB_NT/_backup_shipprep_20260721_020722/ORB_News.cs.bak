@@ -139,8 +139,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 string country = GetJsonField(block, "country");
                 string impact = GetJsonField(block, "impact");
                 if (!country.Equals("USD", StringComparison.OrdinalIgnoreCase)) continue;
-                // Keep ALL impacts — the guard-mode filter (RedOnly /
-                // RedAndOrange / All) is applied at query time.
+                if (!impact.Equals("High", StringComparison.OrdinalIgnoreCase)) continue;
 
                 string dateStr = GetJsonField(block, "date");
                 string title = GetJsonField(block, "title");
@@ -191,7 +190,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 string title = parts[4].Trim();
 
                 if (!currency.Equals("USD", StringComparison.OrdinalIgnoreCase)) continue;
-                // impact kept for query-time guard-mode filtering
+                if (!impact.Equals("High", StringComparison.OrdinalIgnoreCase)) continue;
 
                 if (DateTime.TryParse(dateStr + " " + timeStr, out DateTime eventTimeET))
                 {
@@ -214,24 +213,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         // Each grabs a local snapshot of the (volatile) events reference so a
         // concurrent background refresh can never invalidate the iteration.
         //----------------------------------------------------------------------
-        // Guard-mode filter: RedOnly → High; RedAndOrange → High+Medium;
-        // All → everything. (Off is handled by callers — no blocking at all.)
-        private static bool ImpactMatches(NewsGuardMode mode, string impact)
+        public bool IsNewsBlocked(DateTime currentUTC, int blockMinutesBefore, int blockMinutesAfter)
         {
-            if (mode == NewsGuardMode.All) return true;
-            bool high = string.Equals(impact, "High", StringComparison.OrdinalIgnoreCase);
-            if (mode == NewsGuardMode.RedOnly) return high;
-            return high || string.Equals(impact, "Medium", StringComparison.OrdinalIgnoreCase);
-        }
-
-        public bool IsNewsBlocked(DateTime currentUTC, int blockMinutesBefore, int blockMinutesAfter,
-            NewsGuardMode mode = NewsGuardMode.RedOnly)
-        {
-            if (mode == NewsGuardMode.Off) return false;
             var snapshot = events;
             foreach (var ev in snapshot)
             {
-                if (!ImpactMatches(mode, ev.Impact)) continue;
                 DateTime windowStart = ev.TimeUTC.AddMinutes(-blockMinutesBefore);
                 DateTime windowEnd = ev.TimeUTC.AddMinutes(blockMinutesAfter);
                 if (currentUTC >= windowStart && currentUTC <= windowEnd)
@@ -240,30 +226,24 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             return false;
         }
 
-        public bool IsNewsFreezingTrail(DateTime currentUTC, int freezeMinutesBefore, int freezeMinutesAfter,
-            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        public bool IsNewsFreezingTrail(DateTime currentUTC, int freezeMinutesBefore, int freezeMinutesAfter)
         {
-            return IsNewsBlocked(currentUTC, freezeMinutesBefore, freezeMinutesAfter, mode);
+            return IsNewsBlocked(currentUTC, freezeMinutesBefore, freezeMinutesAfter);
         }
 
-        public bool IsNewsFlattening(DateTime currentUTC, int flattenMinutesBefore,
-            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        public bool IsNewsFlattening(DateTime currentUTC, int flattenMinutesBefore)
         {
-            return IsNewsBlocked(currentUTC, flattenMinutesBefore, 0, mode);
+            return IsNewsBlocked(currentUTC, flattenMinutesBefore, 0);
         }
 
-        public string GetNextEventDescription(DateTime currentUTC,
-            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        public string GetNextEventDescription(DateTime currentUTC)
         {
             NewsEvent next = null;
             TimeSpan shortest = TimeSpan.MaxValue;
 
-            // For display, Off still shows the next red-folder event
-            NewsGuardMode dispMode = mode == NewsGuardMode.Off ? NewsGuardMode.RedOnly : mode;
             var snapshot = events;
             foreach (var ev in snapshot)
             {
-                if (!ImpactMatches(dispMode, ev.Impact)) continue;
                 if (ev.TimeUTC > currentUTC)
                 {
                     TimeSpan diff = ev.TimeUTC - currentUTC;

@@ -167,5 +167,85 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             return (slOrder, tpOrder);
         }
 
+        // Applies a trailing-stop target computed by CalculateTrailingStop /
+        // CalculateBreakevenStop to a LIVE working SL order via ChangeOrder.
+        // Mirrors MT5's TrailModifyOrLock: idempotent (only fires when the
+        // target actually improves on the current stop by more than 1 tick),
+        // and respects the broker/exchange minimum stop distance.
+        // Returns true if a ChangeOrder request was actually sent.
+        public static bool ApplyTrailingStop(Strategy strategy, Order slOrder, bool isLong, double targetSL, double minTick)
+        {
+            if (slOrder == null) return false;
+            if (slOrder.OrderState != OrderState.Working && slOrder.OrderState != OrderState.Accepted) return false;
+
+            double currentStop = slOrder.StopPrice;
+
+            // Idempotency / forward-only guard — never move the stop backward.
+            if (isLong && targetSL <= currentStop + minTick) return false;
+            if (!isLong && targetSL >= currentStop - minTick) return false;
+
+            strategy.ChangeOrder(slOrder, slOrder.Quantity, 0, targetSL);
+            return true;
+        }
+        
+        public static double CalculateTrailingStop(bool isLong, double currentPrice, double entryPrice, double currentSL, double thresholdPts, double trailGapPts, double minTick)
+        {
+            double newSL = currentSL;
+            if (isLong)
+            {
+                double profit = currentPrice - entryPrice;
+                if (profit >= thresholdPts)
+                {
+                    double candidateSL = currentPrice - trailGapPts;
+                    if (candidateSL > currentSL + minTick)
+                    {
+                        newSL = candidateSL;
+                    }
+                }
+            }
+            else
+            {
+                double profit = entryPrice - currentPrice;
+                if (profit >= thresholdPts)
+                {
+                    double candidateSL = currentPrice + trailGapPts;
+                    if (candidateSL < currentSL - minTick)
+                    {
+                        newSL = candidateSL;
+                    }
+                }
+            }
+            return newSL;
+        }
+
+        public static double CalculateBreakevenStop(bool isLong, double currentPrice, double entryPrice, double currentSL, double thresholdPts, double beCostPts, double minTick)
+        {
+            double newSL = currentSL;
+            if (isLong)
+            {
+                double profit = currentPrice - entryPrice;
+                if (profit >= thresholdPts)
+                {
+                    double candidateSL = entryPrice + beCostPts;
+                    if (candidateSL > currentSL + minTick)
+                    {
+                        newSL = candidateSL;
+                    }
+                }
+            }
+            else
+            {
+                double profit = entryPrice - currentPrice;
+                if (profit >= thresholdPts)
+                {
+                    double candidateSL = entryPrice - beCostPts;
+                    if (candidateSL < currentSL - minTick)
+                    {
+                        newSL = candidateSL;
+                    }
+                }
+            }
+            return newSL;
+        }
     }
 }

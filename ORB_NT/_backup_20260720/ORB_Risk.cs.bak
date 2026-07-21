@@ -19,24 +19,12 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         // Simple lookup for Day Margin per contract (e.g., $50 for MES)
         private static readonly Dictionary<string, double> MarginTable = new Dictionary<string, double>()
         {
-            // Equity index
             { "MES", 50.0 },
             { "MNQ", 100.0 },
             { "MYM", 50.0 },
-            { "M2K", 50.0 },
             { "ES", 500.0 },
             { "NQ", 1000.0 },
-            { "YM", 500.0 },
-            { "RTY", 500.0 },
-            // Metals — GC is $10k+ overnight but typical prop/day margin is much lower;
-            // these are conservative intraday figures. Adjust to your broker/firm.
-            { "GC", 1000.0 },
-            { "MGC", 100.0 },
-            { "SI", 1500.0 },
-            { "SIL", 150.0 },
-            // Energy
-            { "CL", 1000.0 },
-            { "MCL", 100.0 }
+            { "YM", 500.0 }
         };
 
         public static double GetMarginPerContract(string symbol)
@@ -58,16 +46,16 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
 
             double riskMoney = accountBalance * (riskPercent / 100.0);
             double cashPerContract = slDistancePoints * pointValue;
-
+            
             // Basic contract math
             int computedContracts = (int)Math.Floor(riskMoney / cashPerContract);
-
-            // Hard cap enforcement. Override (>0) REPLACES the mode cap outright —
-            // it can raise it as well as lower it (e.g. GC full-size where the
-            // Micro/Mini presets don't apply).
+            
+            // Hard cap enforcement
             int hardCap = (mode == ContractSizeMode.Micro) ? MAX_MICRO_CONTRACTS : MAX_MINI_CONTRACTS;
-            if (maxContractsOverride > 0)
+            if (maxContractsOverride > 0 && maxContractsOverride < hardCap)
+            {
                 hardCap = maxContractsOverride;
+            }
 
             return Math.Min(computedContracts, hardCap);
         }

@@ -29,10 +29,8 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         private bool discordEnabled;
         private bool telegramEnabled;
 
-        private readonly Queue<NotifyQueueItem> messageQueue = new Queue<NotifyQueueItem>();
-        private readonly HashSet<string> dedupeKeys = new HashSet<string>();
-        private readonly object qSync = new object();
-        private bool sendInFlight = false;
+        private Queue<NotifyQueueItem> messageQueue = new Queue<NotifyQueueItem>();
+        private HashSet<string> dedupeKeys = new HashSet<string>();
 
         private static readonly HttpClient http = new HttpClient();
 
@@ -66,44 +64,36 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         //----------------------------------------------------------------------
         public void Enqueue(string text, int colorInt = 0x1ABC9C)
         {
-            lock (qSync)
-                messageQueue.Enqueue(new NotifyQueueItem { Text = text, ColorInt = colorInt, Retries = 0 });
+            messageQueue.Enqueue(new NotifyQueueItem { Text = text, ColorInt = colorInt, Retries = 0 });
         }
 
         //----------------------------------------------------------------------
-        // Drain one item per pulse. The HTTP send runs on a BACKGROUND task —
-        // a slow/unreachable webhook must never block the strategy thread.
+        // Drain one item from the queue — call from OnBarUpdate (tick cadence)
         //----------------------------------------------------------------------
         public void DrainQueue()
         {
-            NotifyQueueItem item;
-            lock (qSync)
-            {
-                if (sendInFlight || messageQueue.Count == 0) return;
-                item = messageQueue.Dequeue();
-                sendInFlight = true;
-            }
+            if (messageQueue.Count == 0) return;
 
-            Task.Run(() =>
+            NotifyQueueItem item = messageQueue.Dequeue();
+            bool ok = SendDirect(item.Text, item.ColorInt);
+            if (!ok)
             {
-                bool ok = false;
-                try { ok = SendDirect(item.Text, item.ColorInt); }
-                catch { }
-                lock (qSync)
+                if (item.Retries < 3)
                 {
-                    sendInFlight = false;
-                    if (!ok && item.Retries < 3)
-                    {
-                        item.Retries++;
-                        // Re-queue at the FRONT so ordering is preserved
-                        var rest = new List<NotifyQueueItem>(messageQueue);
-                        messageQueue.Clear();
-                        messageQueue.Enqueue(item);
-                        foreach (var m in rest) messageQueue.Enqueue(m);
-                    }
-                    // 3 failed retries → drop silently (webhook misconfigured)
+                    item.Retries++;
+                    Console.WriteLine(string.Format("[ORB] Webhook dispatch failed. Requeuing notification (Retry {0}/3).", item.Retries));
+                    // Prepend back to queue (re-enqueue at front using a temporary list)
+                    var temp = new List<NotifyQueueItem>(messageQueue);
+                    messageQueue.Clear();
+                    messageQueue.Enqueue(item);
+                    foreach (var m in temp) messageQueue.Enqueue(m);
                 }
-            });
+                else
+                {
+                    Console.WriteLine("[ORB] Webhook dispatch failed permanently after 3 retries. " +
+                        "Discarding notification. Check webhook URL configuration.");
+                }
+            }
         }
 
         //----------------------------------------------------------------------
@@ -231,5 +221,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             Enqueue(text, 0x95A5A6);
         }
 
+        public void PruneDedupe(TimeSpan maxAge)
+        {
+            // In the C# version we use an in-memory set so cleanup is session-scoped.
+            // Clear is sufficient since dedupe is only meaningful within the same trading session.
+            dedupeKeys.Clear();
+        }
     }
 }
