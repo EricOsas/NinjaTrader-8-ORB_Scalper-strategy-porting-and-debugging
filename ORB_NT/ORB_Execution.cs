@@ -144,7 +144,24 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 : strategy.SubmitOrderUnmanaged(0, OrderAction.SellShort, OrderType.StopMarket, contracts, 0, level, ocoGroup, "ShortEntry");
         }
 
-        public static (Order slOrder, Order tpOrder) PlaceBracketOrders(Strategy strategy, bool isLong, double fillPrice, int contracts, double slDistancePoints, double tpDistancePoints, string ocoGroup)
+        // Limit price for a protective stop when a hard slip cap is in force.
+        //   slSlipCapPoints <= 0  → 0  (caller submits a plain StopMarket).
+        //   Long  position  → Sell stop: accept fills down to stop − cap.
+        //   Short position  → BuyToCover stop: accept fills up to stop + cap.
+        // Returning 0 signals "no limit / market". Any positive value makes the
+        // stop a StopLimit whose worst fill is bounded — never a market order.
+        public static double SlLimitPrice(bool isLong, double stopPrice, double slSlipCapPoints,
+            NinjaTrader.Cbi.MasterInstrument mi)
+        {
+            if (slSlipCapPoints <= 0) return 0;
+            double lim = isLong ? stopPrice - slSlipCapPoints : stopPrice + slSlipCapPoints;
+            return mi.RoundToTickSize(lim);
+        }
+
+        // slSlipCapPoints > 0  → the protective stop is submitted as a StopLimit
+        //   capped at that many points of slippage (no market fallback).
+        // slSlipCapPoints == 0 → legacy StopMarket (guaranteed exit, pays slip).
+        public static (Order slOrder, Order tpOrder) PlaceBracketOrders(Strategy strategy, bool isLong, double fillPrice, int contracts, double slDistancePoints, double tpDistancePoints, string ocoGroup, double slSlipCapPoints = 0)
         {
             // Custom-point distances (e.g. 0.01-based on a 0.10-tick contract)
             // can land off the exchange grid — always snap to the REAL tick.
@@ -154,14 +171,20 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             {
                 double slPrice = mi.RoundToTickSize(fillPrice - slDistancePoints);
                 double tpPrice = mi.RoundToTickSize(fillPrice + tpDistancePoints);
-                slOrder = strategy.SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.StopMarket, contracts, 0, slPrice, ocoGroup, "LongSL");
+                double slLimit = SlLimitPrice(true, slPrice, slSlipCapPoints, mi);
+                slOrder = slLimit > 0
+                    ? strategy.SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.StopLimit, contracts, slLimit, slPrice, ocoGroup, "LongSL")
+                    : strategy.SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.StopMarket, contracts, 0, slPrice, ocoGroup, "LongSL");
                 tpOrder = strategy.SubmitOrderUnmanaged(0, OrderAction.Sell, OrderType.Limit, contracts, tpPrice, 0, ocoGroup, "LongTP");
             }
             else
             {
                 double slPrice = mi.RoundToTickSize(fillPrice + slDistancePoints);
                 double tpPrice = mi.RoundToTickSize(fillPrice - tpDistancePoints);
-                slOrder = strategy.SubmitOrderUnmanaged(0, OrderAction.BuyToCover, OrderType.StopMarket, contracts, 0, slPrice, ocoGroup, "ShortSL");
+                double slLimit = SlLimitPrice(false, slPrice, slSlipCapPoints, mi);
+                slOrder = slLimit > 0
+                    ? strategy.SubmitOrderUnmanaged(0, OrderAction.BuyToCover, OrderType.StopLimit, contracts, slLimit, slPrice, ocoGroup, "ShortSL")
+                    : strategy.SubmitOrderUnmanaged(0, OrderAction.BuyToCover, OrderType.StopMarket, contracts, 0, slPrice, ocoGroup, "ShortSL");
                 tpOrder = strategy.SubmitOrderUnmanaged(0, OrderAction.BuyToCover, OrderType.Limit, contracts, tpPrice, 0, ocoGroup, "ShortTP");
             }
             return (slOrder, tpOrder);

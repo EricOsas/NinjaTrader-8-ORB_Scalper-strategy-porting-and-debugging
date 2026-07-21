@@ -24,6 +24,9 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         public double PnL;            // net, after commission
         public double SlipTicks;
         public string ExitReason = ""; // SL / TP / EOD / News / Manual / SlipForceClose
+        public string Source = "REAL"; // REAL = broker-executed. Anything else
+                                       // (legacy rows with no column, or sims) is
+                                       // ignored when rebuilding the Eval trackers.
     }
 
     //======================================================================
@@ -101,12 +104,13 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                     using (var sw = new StreamWriter(ledgerPath, true, Encoding.UTF8))
                     {
                         if (writeHeader)
-                            sw.WriteLine("EntryTimeUTC,ExitTimeUTC,Slot,SessionKey,Dir,Entry,Exit,Contracts,PnL,SlipTicks,ExitReason");
+                            sw.WriteLine("EntryTimeUTC,ExitTimeUTC,Slot,SessionKey,Dir,Entry,Exit,Contracts,PnL,SlipTicks,ExitReason,Source");
                         sw.WriteLine(string.Join(",",
                             T(t.EntryTimeUTC), T(t.ExitTimeUTC), t.SlotIndex,
                             Sanitize(t.SessionKey), t.IsLong ? "LONG" : "SHORT",
                             F(t.EntryPrice), F(t.ExitPrice), t.Contracts,
-                            F(t.PnL), F(t.SlipTicks), Sanitize(t.ExitReason)));
+                            F(t.PnL), F(t.SlipTicks), Sanitize(t.ExitReason),
+                            Sanitize(string.IsNullOrEmpty(t.Source) ? "REAL" : t.Source)));
                     }
                 }
                 catch { /* persistence is best-effort; never break trading */ }
@@ -133,7 +137,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                             SessionKey = p[3], IsLong = p[4] == "LONG",
                             EntryPrice = PD(p[5]), ExitPrice = PD(p[6]),
                             Contracts = int.TryParse(p[7], out int c) ? c : 0,
-                            PnL = PD(p[8]), SlipTicks = PD(p[9]), ExitReason = p[10]
+                            PnL = PD(p[8]), SlipTicks = PD(p[9]), ExitReason = p[10],
+                            // Rows written before this column existed predate the
+                            // realtime gate → treat as LEGACY so the Eval trackers
+                            // never re-count their (possibly simulated) PnL.
+                            Source = p.Length >= 12 ? p[11] : "LEGACY"
                         });
                     }
                 }
