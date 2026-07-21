@@ -161,6 +161,14 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         [Display(Name = "SlipFC | Close excess-slip trade at +N points", Order = 8, GroupName = "5 · Trade Geometry")]
         public double Slip_ForceClose_Profit_Ticks { get; set; } = 20.0;
 
+        // Hard slippage cap for the protective / trailing stop. When > 0 the
+        // stop is submitted as a StopLimit that will NOT fill worse than this
+        // many points past the stop — there is NO market fallback, so a gap
+        // straight through the band can leave the stop unfilled and the
+        // position running. Set to 0 to revert to a guaranteed StopMarket exit.
+        [Display(Name = "Stop Slip Cap Points (0=StopMarket)", Order = 8, GroupName = "5 · Trade Geometry")]
+        public double Stop_Slip_Cap_Ticks { get; set; } = 20.0;
+
         [Display(Name = "Trail Mode (Continuous / Step)", Order = 9, GroupName = "5 · Trade Geometry")]
         public TrailMode Trail_Mode { get; set; } = TrailMode.Continuous;
 
@@ -470,6 +478,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             var seenDays = new HashSet<DateTime>();
             foreach (var t in ledger)
             {
+                // Eval Profit / consistency / fast-trade / traded-days count ONLY
+                // genuinely broker-executed trades. Legacy rows (pre-Source column)
+                // and any sim rows are skipped so historical simulations can never
+                // inflate the dashboard's eval PnL.
+                if (t.Source != "REAL") continue;
                 consistencyTracker.RecordTrade(t.ExitTimeUTC.Date, t.PnL);
                 fastTradeTracker.RecordTrade((t.ExitTimeUTC - t.EntryTimeUTC).TotalSeconds, t.PnL);
                 seenDays.Add(t.ExitTimeUTC.Date);
@@ -546,12 +559,18 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 if (slDist <= 0) slDist = Fixed_SL_Ticks * PointSize;
                 if (tpDist <= 0) tpDist = Fixed_TP_Ticks * PointSize;
 
+                double adoptCap = SlipCapPoints(trade);
                 var (slOrder, tpOrder) = ORB_Execution.PlaceBracketOrders(this, trade.IsLong,
-                    trade.EntryPrice, trade.Contracts, slDist, tpDist, trade.OcoGroup + "_BRK");
+                    trade.EntryPrice, trade.Contracts, slDist, tpDist, trade.OcoGroup + "_BRK", adoptCap);
                 // PlaceBracketOrders anchors off fill price; re-anchor SL to the
-                // snapshot's trailed level if it had moved.
+                // snapshot's trailed level if it had moved (move the StopLimit's
+                // limit with it so the slip cap survives adoption).
                 if (slOrder != null && Math.Abs(slOrder.StopPrice - trade.VirtualSL) > TickSize / 2)
-                    ChangeOrder(slOrder, slOrder.Quantity, 0, Instrument.MasterInstrument.RoundToTickSize(trade.VirtualSL));
+                {
+                    double adoptStop = Instrument.MasterInstrument.RoundToTickSize(trade.VirtualSL);
+                    double adoptLimit = ORB_Execution.SlLimitPrice(trade.IsLong, adoptStop, adoptCap, Instrument.MasterInstrument);
+                    ChangeOrder(slOrder, slOrder.Quantity, adoptLimit, adoptStop);
+                }
 
                 trade.SlOrder = slOrder;
                 trade.TpOrder = tpOrder;
@@ -1609,8 +1628,12 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                             double slDist = Math.Abs(t.EntryPrice - t.VirtualSL);
                             double tpDist = Math.Abs(t.TpPrice > 0 ? t.TpPrice - t.EntryPrice : Fixed_TP_Ticks * PointSize);
                             if (slDist <= 0) slDist = Fixed_SL_Ticks * PointSize;
+                            // Deliberate exception: this is the "bracket rejected,
+                            // position possibly unprotected" recovery path. A slip
+                            // cap could leave a re-placed stop unfilled on a gap, so
+                            // here we force a guaranteed StopMarket exit (cap = 0).
                             var (slO, tpO) = ORB_Execution.PlaceBracketOrders(this, t.IsLong, t.EntryPrice, t.Contracts,
-                                slDist, Math.Abs(tpDist), t.OcoGroup + "_R" + (++ocoCounter));
+                                slDist, Math.Abs(tpDist), t.OcoGroup + "_R" + (++ocoCounter), 0);
                             t.SlOrder = slO;
                             t.TpOrder = tpO;
                         }
@@ -1654,7 +1677,12 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                     CancelOrder(trade.OtherEntryOrder);
                 }
 
-                double fillPx = execution.Price;
+                // Order.AverageFillPrice / Order.Filled are the VWAP and cumulative
+                // quantity across ALL slices of a partially-filled entry. Reading
+                // execution.Price/.Quantity would only see the last slice and size
+                // the bracket + notification to a fraction of the real position.
+                double fillPx = execution.Order.AverageFillPrice;
+                int filledQty = execution.Order.Filled;
                 bool isLong = (marketPosition == MarketPosition.Long);
 
                 // Intended level: instant mode stashed it in VirtualSL pre-fill;
@@ -1707,19 +1735,35 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                     ? (Commission_Per_Contract / Math.Max(1e-9, Instrument.MasterInstrument.PointValue))
                     : BE_Cost_Ticks * PointSize;
 
-                var (slOrder, tpOrder) = ORB_Execution.PlaceBracketOrders(this, isLong, fillPx, execution.Quantity,
-                    slDistance, tpDistance, trade.OcoGroup + "_BRK");
+                // Record the true position size and bracket the WHOLE position;
+                // a StopLimit slip cap keeps the protective stop from filling
+                // worse than Stop_Slip_Cap_Ticks past its trigger (0 = StopMarket).
+                trade.Contracts = filledQty;
+                double slipCap = SlipCapPoints(trade);
+                var (slOrder, tpOrder) = ORB_Execution.PlaceBracketOrders(this, isLong, fillPx, filledQty,
+                    slDistance, tpDistance, trade.OcoGroup + "_BRK", slipCap);
                 trade.SlOrder = slOrder;
                 trade.TpOrder = tpOrder;
 
                 // Consumed-side ledger: this side never re-arms this session
                 if (wasRealtime) state.MarkSideConsumed(trade.SessionKey, isLong);
                 SaveLiveSnapshots();
+
+                // A real fill supersedes the synthetic PREVIEW for BOTH sides of
+                // this slot (the OCO cancels the opposing pending entry anyway).
+                // Remove the synthetic execution boxes and freeze their keys so
+                // the retro simulator never redraws them — otherwise the broker
+                // box S{s}_LIVE and the synthetic box S{s}_SYN_* coexist, which is
+                // the "duplicate synthetic + broker-backed object" on the chart.
+                ORB_Visuals.ClearAllVisuals(this, "S" + s + "_SYN_H");
+                ORB_Visuals.ClearAllVisuals(this, "S" + s + "_SYN_L");
+                syntheticFinal.Add(slots[s].SessionKey + "|H");
+                syntheticFinal.Add(slots[s].SessionKey + "|L");
                 // (trade tool is drawn by the 1s visual pulse from here on)
 
-                notifier?.NotifyFill(ocoCounter, trade.SessionKey, isLong, fillPx, slPx, tpPx, execution.Quantity);
+                notifier?.NotifyFill(ocoCounter, trade.SessionKey, isLong, fillPx, slPx, tpPx, filledQty);
                 Log(string.Format("[ORB] S{0} {1} filled: {2} @ {3:F2} (slip {4:F1}pt), SL={5:F2}, TP={6:F2} x{7}",
-                    s, SlotNames[s], isLong ? "LONG" : "SHORT", fillPx, slipTicks, slPx, tpPx, execution.Quantity), LogLevel.Information);
+                    s, SlotNames[s], isLong ? "LONG" : "SHORT", fillPx, slipTicks, slPx, tpPx, filledQty), LogLevel.Information);
                 return;
             }
 
@@ -1746,7 +1790,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                               : execution.Order.Name.Contains("_") ? execution.Order.Name.Substring(execution.Order.Name.IndexOf('_') + 1)
                               : "Close";
 
-                FinalizeClosedTrade(s, execution.Price, execution.Quantity, ORB_Time.ChartToUTC(time), reason);
+                // Use the exit order's VWAP and cumulative fill so a sliced
+                // TP/SL books the whole position's realized PnL, not the last
+                // slice — this is the +$350-vs-+$62 notification bug.
+                FinalizeClosedTrade(s, execution.Order.AverageFillPrice, execution.Order.Filled,
+                    ORB_Time.ChartToUTC(time), reason);
 
                 if (execution.Order == trade.SlOrder) TryCancelOrder(trade.TpOrder);
                 else if (execution.Order == trade.TpOrder) TryCancelOrder(trade.SlOrder);
@@ -1811,7 +1859,8 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                     Contracts = quantity,
                     PnL = pnl,
                     SlipTicks = trade.SlipTicks,
-                    ExitReason = reason
+                    ExitReason = reason,
+                    Source = "REAL" // wasRealtime-gated: broker-executed only
                 });
 
             notifier?.NotifyResult(ocoCounter, trade.SessionKey, trade.IsLong,
@@ -1820,6 +1869,16 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
 
             Log(string.Format("[ORB] S{0} {1} closed @ {2:F2} ({3}). PnL={4:+0.00;-0.00}",
                 s, SlotNames[s], exitPrice, reason, pnl), LogLevel.Information);
+        }
+
+        // Slip cap (price points) for a trade's protective/trailing stop.
+        // 0 → the stop stays a guaranteed StopMarket. A positive value makes it
+        // a StopLimit bounded to that slippage (no market fallback). Excess-slip
+        // trades intentionally exit at market, so they never get a cap.
+        private double SlipCapPoints(ActiveTrade trade)
+        {
+            if (trade != null && trade.SlipForceClose) return 0;
+            return Stop_Slip_Cap_Ticks > 0 ? Stop_Slip_Cap_Ticks * PointSize : 0;
         }
 
         //======================================================================
@@ -1861,7 +1920,12 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
 
             if (trade.SlOrder.OrderState == OrderState.Working || trade.SlOrder.OrderState == OrderState.Accepted)
             {
-                ChangeOrder(trade.SlOrder, trade.SlOrder.Quantity, 0, Instrument.MasterInstrument.RoundToTickSize(newSL));
+                double newStop = Instrument.MasterInstrument.RoundToTickSize(newSL);
+                // A StopLimit trail must move its limit alongside the stop, or the
+                // stale limit blocks the fill. limit=0 keeps a plain StopMarket.
+                double newLimit = ORB_Execution.SlLimitPrice(trade.IsLong, newStop,
+                    SlipCapPoints(trade), Instrument.MasterInstrument);
+                ChangeOrder(trade.SlOrder, trade.SlOrder.Quantity, newLimit, newStop);
                 bool firstTrail = !trade.TrailingActivated;
                 trade.VirtualSL = newSL;
                 trade.TrailingActivated = true;
