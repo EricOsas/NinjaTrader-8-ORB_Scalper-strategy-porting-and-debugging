@@ -164,6 +164,16 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         public DateTime TrailStartTime { get; set; } // first trail modification time
         public int TrailCount { get; set; }
 
+        // ── Trail modify debounce (MT5 VirtualTrade parity) ──
+        // Without these, ManageTrade re-sends a ChangeOrder essentially every
+        // tick while price crawls, so the resting stop is perpetually chasing a
+        // moving target and lands several ticks stale when price finally hits it
+        // (the self-inflicted "9.9 points missing" trailed-exit leak). We never
+        // send a new trail target while a previous modify is still resolving,
+        // and cap the resend rate to once per MinModifyIntervalMs.
+        public DateTime LastModifyAttempt { get; set; } = DateTime.MinValue;
+        public bool ModifyInFlight { get; set; }         // true = a ChangeOrder is submitted but not yet confirmed Working
+
         // ── Snapshot geometry (frozen at fill, MT5 vTrades.snap* parity) ──
         // Trailing always reads these, never live inputs — changing strategy
         // parameters mid-trade must not affect an open position.
