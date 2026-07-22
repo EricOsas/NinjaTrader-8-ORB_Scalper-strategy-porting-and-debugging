@@ -441,10 +441,24 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                     secTimer.Dispose();
                     secTimer = null;
                 }
-                // Persist live trades so the next launch can adopt them,
-                // then cancel only our pending ENTRY orders (brackets stay
-                // working at the broker to protect the open position).
-                SaveLiveSnapshots();
+                // If the broker position is already flat (e.g. manually closed by
+                // the user) there is nothing to protect and nothing to adopt on
+                // the next launch.  Clear the live-trade file now so re-enabling
+                // the strategy does not attempt to cancel orders that never existed,
+                // which is what produces the "Strategy was not started" dialog.
+                bool posFlat = (Position == null || Position.MarketPosition == MarketPosition.Flat);
+                if (posFlat)
+                {
+                    state?.ClearLiveTrades();
+                    Log("[ORB] Terminated with flat position — live-trade snapshot cleared. Safe to re-enable.", LogLevel.Information);
+                }
+                else
+                {
+                    // Persist live trades so the next launch can adopt them,
+                    // then cancel only our pending ENTRY orders (brackets stay
+                    // working at the broker to protect the open position).
+                    SaveLiveSnapshots();
+                }
                 CancelEntryOrdersOnly();
                 ORB_Dashboard.Clear(this);
             }
@@ -524,22 +538,47 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             var snapshots = state.LoadLiveTrades();
             if (snapshots.Count == 0) return;
 
+            // ── Position accumulation fix ──────────────────────────────────────
+            // Guard how many contracts of the REAL broker position have already
+            // been claimed by prior snapshots this loop.  Without this gate,
+            // every snapshot whose direction matches "Position.Quantity >= snap.Contracts"
+            // gets adopted independently, so N stale snapshots each place fresh
+            // brackets and issue SlipForceClose market orders for N×qty contracts.
+            int claimedLong  = 0;
+            int claimedShort = 0;
+            int brokerLong   = (Position.MarketPosition == MarketPosition.Long)  ? Position.Quantity : 0;
+            int brokerShort  = (Position.MarketPosition == MarketPosition.Short) ? Position.Quantity : 0;
+
+            // If broker is flat there is nothing to adopt; clear the stale file
+            // and return so a re-enable after a manual close never hits "was not started".
+            if (brokerLong == 0 && brokerShort == 0)
+            {
+                state.ClearLiveTrades();
+                Log("[ORB] AdoptFromSnapshots: broker position is flat — stale live-trade file cleared.", LogLevel.Information);
+                return;
+            }
+
             foreach (var snap in snapshots)
             {
                 if (snap.SlotIndex < 0 || snap.SlotIndex >= SLOT_COUNT) continue;
 
-                // Does the account still hold a matching position?
-                bool match = (snap.IsLong && Position.MarketPosition == MarketPosition.Long && Position.Quantity >= snap.Contracts)
-                          || (!snap.IsLong && Position.MarketPosition == MarketPosition.Short && Position.Quantity >= snap.Contracts);
+                // Does the account still hold enough un-claimed contracts?
+                int available = snap.IsLong ? (brokerLong - claimedLong) : (brokerShort - claimedShort);
+                bool match = available >= snap.Contracts;
 
                 if (!match)
                 {
-                    // Closed while we were offline (SL/TP filled at the broker).
-                    // Exit price unknown — log it; the side stays consumed.
-                    Log(string.Format("[ORB] Snapshot S{0} {1} {2} x{3}: no matching account position — closed while offline. Side stays consumed.",
-                        snap.SlotIndex, SlotNames[snap.SlotIndex], snap.IsLong ? "LONG" : "SHORT", snap.Contracts), LogLevel.Warning);
+                    // Either closed while offline, or we have already claimed all
+                    // available broker contracts with prior snapshots.
+                    Log(string.Format("[ORB] Snapshot S{0} {1} {2} x{3}: no available broker contracts ({4} remaining) — closed while offline or duplicate. Side stays consumed.",
+                        snap.SlotIndex, SlotNames[snap.SlotIndex], snap.IsLong ? "LONG" : "SHORT", snap.Contracts, available), LogLevel.Warning);
                     continue;
                 }
+
+                // Claim these contracts so the next snapshot in the list cannot
+                // adopt the same broker lots a second time.
+                if (snap.IsLong) claimedLong  += snap.Contracts;
+                else             claimedShort += snap.Contracts;
 
                 var trade = new ActiveTrade
                 {
