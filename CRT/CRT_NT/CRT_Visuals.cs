@@ -46,21 +46,28 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
                 Brushes.Transparent, fill, 25);
         }
 
-        // Entry / SL / TP lines for the active trade.
-        public static void DrawTradeLevels(Strategy s, double entry, double sl, double tp)
+        // Entry / SL / TP lines for a trade. Keyed by 'key' (the lane session
+        // key) so overlapping concurrent setups each keep their own levels.
+        public static void DrawTradeLevels(Strategy s, string key, double entry, double sl, double tp)
         {
             if (s == null) return;
-            s.Draw.HorizontalLine(s, P + "entry", entry, Brushes.Gold, DashStyleHelper.Solid, 1);
-            s.Draw.HorizontalLine(s, P + "sl", sl, Brushes.IndianRed, DashStyleHelper.Dash, 1);
-            s.Draw.HorizontalLine(s, P + "tp", tp, Brushes.SeaGreen, DashStyleHelper.Dash, 1);
+            string k = Safe(key);
+            s.Draw.HorizontalLine(s, P + "entry_" + k, entry, Brushes.Gold, DashStyleHelper.Solid, 1);
+            s.Draw.HorizontalLine(s, P + "sl_" + k, sl, Brushes.IndianRed, DashStyleHelper.Dash, 1);
+            s.Draw.HorizontalLine(s, P + "tp_" + k, tp, Brushes.SeaGreen, DashStyleHelper.Dash, 1);
         }
 
-        public static void ClearTradeLevels(Strategy s)
+        public static void ClearTradeLevels(Strategy s, string key)
         {
             if (s == null) return;
-            s.RemoveDrawObject(P + "entry");
-            s.RemoveDrawObject(P + "sl");
-            s.RemoveDrawObject(P + "tp");
+            string k = Safe(key);
+            s.RemoveDrawObject(P + "entry_" + k);
+            s.RemoveDrawObject(P + "sl_" + k);
+            s.RemoveDrawObject(P + "tp_" + k);
         }
+
+        // NinjaTrader draw tags must be simple identifiers; strip separators.
+        private static string Safe(string key)
+            => string.IsNullOrEmpty(key) ? "x" : key.Replace("#", "_").Replace(":", "_").Replace(" ", "_");
     }
 }
