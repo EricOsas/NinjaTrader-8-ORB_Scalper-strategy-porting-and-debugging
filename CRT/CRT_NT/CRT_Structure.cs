@@ -22,7 +22,10 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
         }
 
         // Update the running C2 extreme and sweep flags from a forming LTF bar
-        // (or the C2 HTF bar itself). Returns true if a NEW sweep was detected.
+        // (or the C2 HTF bar itself). The sweep can ONLY occur in C2 — this must
+        // never be called during the C3 window. Returns true if a NEW sweep was
+        // detected. The C2 extreme tracked here (C2RunHigh / C2RunLow) is the
+        // FIXED anchor for the SL (§7) and is independent of the 50% calc.
         public static bool UpdateSweep(CrtSetup s, double high, double low)
         {
             bool newlySwept = false;
@@ -32,11 +35,10 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             if (!s.SweptHigh && s.C2RunHigh > s.C1High) { s.SweptHigh = true; newlySwept = true; }
             if (!s.SweptLow && s.C2RunLow < s.C1Low)   { s.SweptLow = true; newlySwept = true; }
 
-            // Track the manipulation-leg extreme on the swept side (used for SL).
-            if (s.SweptHigh) s.ManipExtreme = Math.Max(s.ManipExtreme <= 0 ? double.MinValue : s.ManipExtreme, s.C2RunHigh);
-            if (s.SweptLow)
-                s.ManipExtreme = (s.ManipExtreme <= 0) ? s.C2RunLow : Math.Min(s.ManipExtreme, s.C2RunLow);
-
+            // The manipulation-candle extreme on the swept side (used verbatim as
+            // the SL anchor). For an eventual short it is the highest high; for a
+            // long it is the lowest low. Bias is resolved at C2 close, so we keep
+            // both running extremes and pick the correct one in SweepExtreme().
             return newlySwept;
         }
 
@@ -63,14 +65,26 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             return TradeBias.None; // breakout / no valid close-back-inside
         }
 
-        // The sweep-leg extreme used for the stop (highest high for shorts,
-        // lowest low for longs).
+        // The C2 (manipulation-candle) extreme used as the FIXED SL anchor:
+        // highest high for shorts, lowest low for longs. This is the farthest
+        // C2 reached before closing back inside C1. It is INDEPENDENT of the 50%
+        // calc — C1_EQ never uses this value.
         public static double SweepExtreme(CrtSetup s)
         {
             return s.Bias == TradeBias.Short ? s.C2RunHigh : s.C2RunLow;
         }
 
-        // 50% guard: has price already reached C1_EQ on the eventual trade side?
+        // Resolve the actual SL price = C2 extreme ± buffer (short: above the
+        // high; long: below the low). bufferPx is in price units.
+        public static double SlFromC2Extreme(CrtSetup s, double bufferPx)
+        {
+            double ext = SweepExtreme(s);
+            return s.Bias == TradeBias.Short ? ext + bufferPx : ext - bufferPx;
+        }
+
+        // 50% guard / invalidation trigger: has price reached C1_EQ (50% of C1)
+        // on the trade side? Live for the ENTIRE setup life, including while a
+        // 1:1 limit rests after C3 close. A true result invalidates the setup.
         public static bool FiftyTaken(CrtSetup s, double priceHigh, double priceLow)
         {
             if (s.Bias == TradeBias.Short) return priceLow <= s.C1EQ;   // dropped to EQ already

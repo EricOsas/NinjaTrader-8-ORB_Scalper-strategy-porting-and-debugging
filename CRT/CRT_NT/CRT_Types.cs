@@ -13,14 +13,17 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
     public enum SlotType { Intraday, Daily, Weekly, Monthly }
 
     // Setup lifecycle per reference candle (C1)
+    //   C2 is STRICTLY the manipulation candle — it never triggers/executes.
+    //   The liquidity sweep can only occur in C2; execution only in C3.
     public enum SetupPhase
     {
         WaitC1,          // waiting for a C1 to close
-        C2Watch,         // C1 locked; C2 forming — watch sweep + scan CISD/IFVG
-        C2ClosedArmed,   // C2 closed with valid bias — ready to place at C3 open (carry-over)
-        C3Window,        // inside C3 — keep scanning trigger / manage resting limit
+        C2Watch,         // C1 locked; C2 forming — watch sweep + scan CISD/IFVG (provisional)
+        C2ClosedArmed,   // C2 closed with valid bias — decide market/limit at C2-close / C3-open boundary
+        C3Window,        // inside C3 — keep scanning trigger (if no C2 carry) / manage resting limit
+        LimitWorking,    // a 1:1 limit is resting — PERSISTS beyond C3 close; dies on fill or 50% touch
         Filled,          // an entry filled — position live
-        Done             // window ended / invalidated / TP hit
+        Done             // invalidated (50% taken) / TP hit / no valid setup
     }
 
     public enum TradeBias { None, Long, Short }
@@ -62,32 +65,45 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
         // C2 / sweep
         public DateTime C2OpenUTC, C2CloseUTC, C3OpenUTC, C3CloseUTC;
         public bool SweptHigh, SweptLow;
-        public double ManipExtreme;     // highest high (short) / lowest low (long) of the sweep leg
+        // C2 (manipulation-candle) running extremes — the SL anchor lives here.
+        // C2RunHigh = highest high of C2 (SL anchor for shorts);
+        // C2RunLow  = lowest low  of C2 (SL anchor for longs). See SweepExtreme().
         public double C2RunHigh = double.MinValue, C2RunLow = double.MaxValue;
 
         public TradeBias Bias = TradeBias.None;
         public bool FiftyGuardDead;     // true if price already took 50% of C1 before entry
 
-        // Trigger carry-over
+        // Trigger carry-over (a C2 confirmation is PROVISIONAL until the C2-close/C3-open boundary)
         public bool TriggerFired;
+        public bool TriggerFiredInC2;   // provenance: did the trigger fire inside C2?
         public bool CarryToC3;
         public double ConfirmClose;     // close price of the confirming candle
-        public double SlLevel;          // resolved SL (sweep extreme +/- buffer)
+        public double SlLevel;          // resolved SL — FIXED at the C2 extreme (C2_High/Low) ± buffer
+
+        // Resting 1:1 limit lifecycle — persists beyond C3 close; only fill or a 50% touch ends it.
+        public bool LimitResting;       // a 1:1 limit is currently working
+        public double LimitPrice;       // its price = (C1_EQ + SlLevel)/2
+        public bool Invalidated;        // set when price touches 50% (C1_EQ) before a fill
+        public string InvalidReason = "";
 
         public string SessionKey = "";  // slot + C1 time (identity)
 
         public void ResetSweepScan()
         {
             SweptHigh = SweptLow = false;
-            ManipExtreme = 0;
             C2RunHigh = double.MinValue;
             C2RunLow = double.MaxValue;
             Bias = TradeBias.None;
             FiftyGuardDead = false;
             TriggerFired = false;
+            TriggerFiredInC2 = false;
             CarryToC3 = false;
             ConfirmClose = 0;
             SlLevel = 0;
+            LimitResting = false;
+            LimitPrice = 0;
+            Invalidated = false;
+            InvalidReason = "";
         }
     }
 

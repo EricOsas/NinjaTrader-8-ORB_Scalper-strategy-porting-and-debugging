@@ -6,9 +6,15 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
 {
     //======================================================================
     // CRT_Execution — order placement. NO OCO, NO trailing (per spec).
-    //   • Market entry when >= 1:1 reward available at the confirming close.
-    //   • Otherwise a single 1:1 LIMIT at (C1_EQ ∓ risk).
-    //   • On fill, a static SL (sweep wick ± buffer) + TP (C1_EQ) bracket.
+    //   • Execution ONLY ever happens in C3 (C2 never fills). The decision is
+    //     taken at the C2-close / C3-open boundary.
+    //   • Market entry when >= 1:1 reward is available at that boundary.
+    //   • Otherwise a single 1:1 LIMIT at the midpoint (C1_EQ + SL)/2. That
+    //     limit PERSISTS beyond C3 close — the orchestrator cancels it only on
+    //     fill or when price touches 50% (C1_EQ), which also invalidates.
+    //   • SL is FIXED at the C2 (manipulation-candle) extreme ± buffer and is
+    //     independent of the 50% (C1_EQ) calc.
+    //   • On fill, a static SL + TP (C1_EQ) bracket.
     //======================================================================
     public static class CRT_Execution
     {
@@ -23,11 +29,12 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             public string SkipReason;
         }
 
-        // Build the entry plan from a confirmed setup.
+        // Build the entry plan from a confirmed setup. Called at the C2-close /
+        // C3-open boundary (carry-over) or when a trigger fires inside C3.
         //   bias      : Long / Short
-        //   confirmPx : close of the confirming candle (market ref)
-        //   c1Eq      : take-profit level
-        //   sweepExt  : manipulation-leg extreme (sweep wick)
+        //   confirmPx : reference price at the decision (confirm close / C3 open)
+        //   c1Eq      : take-profit level (= 50% of C1; from C1 only)
+        //   sweepExt  : C2 (manipulation-candle) extreme — the FIXED SL anchor
         //   bufferPx  : SL buffer in price units
         //   priceNow  : current price (for the 50% guard)
         //   minStopPx : broker/exchange min stop distance (0 for futures usually)
@@ -38,7 +45,7 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             var p = new EntryPlan();
             bool isLong = bias == TradeBias.Long;
 
-            // SL just past the sweep wick.
+            // SL FIXED at the C2 extreme ± buffer (independent of the 50% calc).
             double sl = isLong ? sweepExt - bufferPx : sweepExt + bufferPx;
             sl = mi.RoundToTickSize(sl);
 
