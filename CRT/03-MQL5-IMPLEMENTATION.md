@@ -70,11 +70,19 @@ Same procedural logic as `02-NT8-IMPLEMENTATION.md` §3–§4, expressed over `M
 
 ## 4. Execution
 
+* **C2 never executes; execution is only ever in C3.** The market-entry decision is anchored at
+  the C2-close / C3-open boundary. A CISD/IFVG achieved in C2 is provisional and carries over
+  (strategy spec §1.2, §6.3); the sweep must have occurred in C2.
 * `risk = |entryRef − sl|` (sl = sweep extreme ± `SL_BufferPoints`, respect
   `SYMBOL_TRADE_STOPS_LEVEL`), `reward = |C1_EQ − entryRef|`.
-* 50% guard: skip if price already at `C1_EQ`.
-* `reward ≥ risk` → `OrderSend` market; else `OrderSend` **BuyLimit/SellLimit** at `C1_EQ ∓ risk`
-  (exactly 1:1). Cancel the pending order if price reaches `C1_EQ` before fill; no time cancel.
+* 50% guard: skip if price already at `C1_EQ` at the decision moment.
+* `reward ≥ risk` → `OrderSend` **market** at C3 open; else `OrderSend`
+  **BuyLimit/SellLimit** at `(C1_EQ + sl)/2` (equivalently `C1_EQ ∓ risk`) so the entry is
+  **exactly 1:1**.
+* **The pending limit persists beyond C3 close** — it is *not* cancelled at the end of C3. On
+  every tick (including after C3 has closed) check the 50% level: if price **touches `C1_EQ`
+  before the pending fills → delete the pending order and invalidate the whole setup**. There is
+  **no time-based / window-based cancel**.
 * On fill: set position SL (sweep wick) and TP (`C1_EQ`) — plain SL/TP on the position, **no OCO,
   no trailing**.
 * Lots via `CRT_Risk.mqh` (risk-% / margin cap / broker clamp). Skip trade if 1:1 SL is inside

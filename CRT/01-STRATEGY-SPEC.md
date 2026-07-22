@@ -52,22 +52,57 @@ CRT treats **every** reference candle on the configured HTF as a self-contained 
 liquidity is swept and reversed. Unlike the DTR model, there is **no separate HTF-bias phase** —
 the sweep on C2 itself defines direction.
 
-* **Candle 1 (C1) — the Range.** The reference HTF candle. Lock `C1_High`, `C1_Low` and
-  `C1_EQ = (C1_High + C1_Low)/2` at C1 close. These never change for that setup.
-* **Candle 2 (C2) — the Manipulation.** The HTF candle immediately following C1. We watch for
-  C2 to **sweep** one extreme of C1 (trade beyond C1_High or C1_Low) and then **close back inside**
+* **Candle 1 (C1) — the Range (range-defining candle).** The reference HTF candle. Lock
+  `C1_High`, `C1_Low` and `C1_EQ = (C1_High + C1_Low)/2` at C1 close. These never change for that
+  setup. C1 never sweeps, confirms, or executes — it only defines the range.
+* **Candle 2 (C2) — the Manipulation candle.** The HTF candle immediately following C1. C2 is
+  **strictly the manipulation candle: it can NEVER trigger or execute a trade.** Its job is to
+  **sweep** one extreme of C1 (trade beyond C1_High or C1_Low) and then **close back inside**
   C1's range.
   * Sweep of **C1_High** + close back inside → **SHORT bias** (target C1_EQ below).
   * Sweep of **C1_Low** + close back inside → **LONG bias** (target C1_EQ above).
   * If C2 **closes outside** C1 (beyond the swept extreme) → **setup invalid** (genuine
     breakout/continuation, not a sweep-reversal). Discard.
   * If C2 sweeps neither side → no setup from this C1.
-* **Candle 3 (C3) — the Execution.** The HTF candle following C2. Entry orders are placed on
-  the LTF during C2 (once a trigger fires) and/or at C3 open (if the trigger fired inside C2 —
-  see §6). The setup window closes at the end of C3.
+* **Candle 3 (C3) — the Distribution / Entry candle.** The HTF candle following C2. **C3 is the
+  only candle in which execution may ever occur.** Entry happens either as a **market order at the
+  C2-close / C3-open boundary** (when a C2 trigger is carried over and ≥1:1 is available) or via a
+  **1:1 limit** placed at/after C3 open (see §6). The market-entry opportunity is anchored at C3
+  open, but a resting 1:1 limit **may fill at any time — even after C3 has closed** (§6.2).
 
 > **Timeframe relationship.** C1/C2/C3 are consecutive HTF candles. The sweep, CISD and IFVG
 > are all detected on **LTF** bars printed *inside* the C2 (and C3) HTF windows.
+
+### 1.1 Candle Role Matrix (authoritative — read carefully)
+
+| Event | C1 | C2 (manipulation) | C3 (distribution/entry) |
+|-------|----|--------------------|--------------------------|
+| Define range (H/L/EQ) | **YES (only C1)** | no | no |
+| Liquidity sweep / TS of C1 | no | **MUST occur here (only C2)** | never |
+| CISD | no | **MAY occur** | **MAY occur** |
+| IFVG | no | **MAY occur** | **MAY occur** |
+| Trade execution / order fill | no | **NEVER** | **ONLY here** |
+
+* **The liquidity sweep (TS) can only occur in C2.** If C1 was not swept during the C2 window,
+  there is no setup — the sweep can never be satisfied by C3.
+* **C2 must achieve the sweep; it may also achieve CISD and/or IFVG**, but any confirmation formed
+  inside C2 is **provisional** and only carries forward to C3 (§1.2).
+* **C3 may achieve CISD and/or IFVG**, and C3 is the **only** candle that may execute (if at all).
+* **CISD / IFVG can therefore occur in either C2 or C3; the sweep only in C2; execution only in C3.**
+
+### 1.2 Provisional C2 confirmation & nullification
+
+LTF confirmation (CISD and/or IFVG) may be *achieved* inside C2, but the execution criteria can be
+**nullified within that same C2 candle before its close**. A C2 confirmation is therefore
+provisional and is only actioned at the C2-close / C3-open boundary, and only if, at that moment,
+**all** of the following still hold:
+
+1. C2 closed **back inside** C1 on the swept side (valid bias — not a breakout).
+2. Price has **not** yet reached `C1_EQ` (the 50% level) — the reward still exists (§6.1).
+3. The take-profit at `C1_EQ` still yields **at least 1:1** versus the sweep-wick stop, OR a 1:1
+   limit can be placed (§6.2).
+
+If any of these fail at C2 close, the provisional C2 confirmation is nullified.
 
 ---
 
@@ -123,11 +158,21 @@ A single optional input **`ExecTFMinutesOverride`** governs the LTF:
 3. **C2 closes.**
    * If C2 closed **back inside** C1 on the swept side → bias confirmed (§1).
    * If C2 closed **outside** C1 → **invalidate** the setup.
-4. **50% guard.** If, at any time before entry, price has already reached `C1_EQ` on the trade
-   side (i.e. C2 already took 50% of C1), **no entry is taken** — the reward is gone (§6.1).
-5. **Trigger & entry** per the selected model (§5, §6). Entry may occur inside C2 (deferred to C3
-   open) or inside C3.
-6. **Setup window ends at C3 close.** After that, no entry for this C1.
+   * Any confirmation formed inside C2 is **provisional** (§1.2) and is re-validated here at the
+     C2-close / C3-open boundary before any order is placed. C2 itself never fills an order.
+4. **50% guard / invalidation.** If, at any time before entry fills, price reaches `C1_EQ` on the
+   trade side (i.e. 50% of C1 is taken), the setup is **invalidated**: no market entry is taken,
+   and any resting 1:1 limit is **cancelled** (§6.1, §6.2). This guard is live for the entire life
+   of the setup, including while a limit rests **after C3 has closed**.
+5. **Trigger & entry** per the selected model (§5, §6). A trigger may be *achieved* in C2 or C3,
+   but **execution only ever happens in C3**: either a market order at the C2-close / C3-open
+   boundary, or a 1:1 limit placed at/after C3 open.
+6. **Market-entry window vs limit lifetime.**
+   * The **market-entry** opportunity is anchored at the C2-close / C3-open boundary. If ≥1:1 is
+     available there, a market order is sent immediately; otherwise a 1:1 limit is placed instead.
+   * A **resting 1:1 limit persists beyond C3 close.** It is *not* cancelled at the end of C3. It
+     lives until one of: (a) it **fills**, or (b) price **touches `C1_EQ`** → cancel + invalidate
+     (§6.2). There is **no time-based / window-based cancel**.
 7. **In trade**: managed to **TP = C1_EQ** or **SL = just past the sweep wick** (§7). No trailing,
    no break-even.
 
@@ -156,6 +201,11 @@ The EA exposes **`EntryTriggerModel`** with three options; **CISD is the default
 1. **CISD** (default)
 2. **IFVG**
 3. **CISD + IFVG** (both must be satisfied by the confirming candle)
+
+> **Where these may occur.** Both CISD and IFVG may be achieved in **either C2 or C3** (§1.1). A
+> primitive achieved in C2 is provisional and carries over to C3 (§1.2, §6.3); a primitive
+> achieved in C3 is actioned in C3 directly. Neither primitive is required in C2 — the only thing
+> C2 **must** achieve is the liquidity sweep. Execution is always in C3.
 
 ### 5.1 CISD — Change in State of Delivery (precise)
 
@@ -199,32 +249,42 @@ the inverting candle usually satisfies CISD automatically, but both are checked 
 
 ## 6. Entry Execution
 
-Once the selected trigger fires (during C2 or C3), determine the entry:
+Execution is a **hybrid of market and limit orders, but the entry decision is anchored at/within
+C3 open** (the C2-close / C3-open boundary). C2 never fills. Once the selected trigger is
+satisfied (in C2 — provisionally, carried over — or in C3), determine the entry:
 
-### 6.1 The 50% reward guard (mandatory pre-check)
+### 6.1 The 50% reward guard / invalidation (mandatory, always live)
 
 * Target `TP = C1_EQ`. Compute the reward available from the prospective entry to `C1_EQ`.
-* If price has **already reached C1_EQ** (C2 took ≥50% of C1) → **skip the setup entirely**.
+* If price has **already reached `C1_EQ`** (50% of C1 taken) at the decision moment → **skip the
+  setup entirely** (no market entry).
+* If a 1:1 limit is already resting and price **later touches `C1_EQ`** before the limit fills →
+  **cancel the limit and invalidate the whole setup** (§6.2). This applies even after C3 close.
 
-### 6.2 Market vs 1:1 limit
+### 6.2 Market vs 1:1 limit (decision at C3 open)
 
 Let `risk = |entry − SL|` where SL is just past the sweep wick (§7), and
-`reward = |C1_EQ − entry|`.
+`reward = |C1_EQ − entry|`. Evaluate at the C2-close / C3-open boundary:
 
-* **If `reward ≥ risk` (≥ 1:1 available at market):** enter **at market** on the close of the
-  confirming candle.
-* **If `reward < risk` (market entry would be < 1:1):** do **not** market-fill. Instead place a
-  **limit** at the price that yields exactly **1:1** (i.e. `limit = C1_EQ ∓ risk`, on the trade
-  side, so that entry-to-EQ distance equals the risk distance).
-  * **Cancel rule:** if price reaches `C1_EQ` (the 50% level) **before** the limit fills, cancel
-    the limit — the opportunity is gone.
-  * **No time cancel:** otherwise the limit rests indefinitely (no matter how long price ranges
-    between 50% and the limit) until it fills, `C1_EQ` is hit, or the setup invalidates.
+* **Market path — `reward ≥ risk` (≥ 1:1 available immediately):** If C2 achieved CISD, closed
+  back inside C1 without reaching `C1_EQ`, and the TP at `C1_EQ` is at least 1:1 versus the sweep
+  stop, **enter at market immediately at the C2-close / C3-open boundary** (attributed to C3).
+* **Limit path — `reward < risk` (C3 open does not offer 1:1):** do **not** market-fill. Place a
+  **limit so the entry is exactly at 1:1**. With a fixed sweep-wick SL, the price where
+  `reward == risk` is the midpoint between SL and `C1_EQ`, i.e. `limit = (C1_EQ + SL) / 2`
+  (equivalently `C1_EQ ∓ risk` on the trade side).
+  * **The limit may trigger at any time — even after C3 has closed.** It is *not* bound to the C3
+    window.
+  * **Invalidation:** if price **ever touches `C1_EQ` (50% of C1) before the limit triggers**, the
+    limit is **cancelled and the entire setup is invalidated**.
+  * **No time cancel:** otherwise the limit rests indefinitely until it fills or `C1_EQ` is hit.
 
-### 6.3 CISD-in-C2 carry-over
+### 6.3 CISD-in-C2 carry-over (execution still only in C3)
 
-If the CISD (or CISD+IFVG) confirmation occurred **inside C2**, it **carries over to C3**: place
-the market/limit order at **C3 open**, applying the same §6.1/§6.2 rules at that moment.
+If the CISD (or CISD+IFVG) confirmation occurred **inside C2**, C2 does **not** execute. The
+confirmation is provisional (§1.2) and **carries over to C3**: at the C2-close / C3-open boundary,
+re-validate the guard (§6.1) and place the market order (≥1:1) or the 1:1 limit (§6.2). All
+executions are attributed to C3.
 
 ### 6.4 Concurrency
 

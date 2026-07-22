@@ -69,8 +69,9 @@ pulse. Use `Times[1][]`, `Highs[1][]`, ... for HTF and `Times[2][]`, ... for LTF
 State per slot (`CrtSetup`):
 
 ```
-enum SetupPhase { WaitC1, C1Locked, C2Watch, C2Closed_Armed, C3Window, Filled, Done }
+enum SetupPhase { WaitC1, C2Watch, C2Closed_Armed, C3Window, LimitWorking, Filled, Done }
 enum TradeBias  { None, Long, Short }
+// LimitWorking = a 1:1 limit is resting; persists beyond C3 close until fill or C1_EQ touch.
 ```
 
 Flow:
@@ -89,10 +90,16 @@ Flow:
 3. **C2 close** (HTF bar close) — evaluate close-back-inside (§4 of strategy spec):
    * valid short/long → `bias` set, phase → `C2Closed_Armed`;
    * closed outside → phase → `Done` (invalidated).
-   * If a trigger already fired inside C2, mark `carryToC3 = true`.
-4. **C3 window** — apply optional C3-hour filter (`CRT_HourFilter`). If `carryToC3`, place the
-   order at C3 open (§5). Otherwise keep scanning LTF bars inside C3 for the trigger.
-5. **Window end** — at C3 close, cancel any resting limit and set phase → `Done`.
+   * A trigger fired inside C2 is **provisional** (strategy spec §1.2). It is re-validated here at
+     the C2-close / C3-open boundary; if still valid mark `carryToC3 = true`. **C2 never fills.**
+4. **C3 open / window** — apply optional C3-hour filter (`CRT_HourFilter`). If `carryToC3` and
+   ≥1:1 is available, send a **market** order at C3 open; otherwise place the **1:1 limit**
+   (`(C1_EQ + SL)/2`). If no C2 carry-over, keep scanning LTF bars inside C3 for the trigger and
+   apply the same market-vs-limit decision when it fires.
+5. **Resting limit persists beyond C3 close** (phase → `LimitWorking`). It is **NOT** cancelled at
+   the end of C3. It lives until: (a) it fills (→ `Filled`), or (b) price touches `C1_EQ` → cancel
+   the limit + invalidate (→ `Done`). No time-based/window cancel. Only the *market-entry*
+   opportunity ends at C3 open; a placed limit outlives C3.
 
 ---
 
@@ -131,8 +138,11 @@ else                 -> SubmitOrderUnmanaged(Limit @ C1_EQ ∓ risk)  // 1:1 lim
 * On entry fill (`OnOrderUpdate` Filled) → submit **SL** (StopMarket) and **TP** (Limit @ C1_EQ)
   via `PlaceBracketOrders` (reused, `slSlipCapPoints=0`). Record `ActiveTrade`, write live
   snapshot, notify fill.
-* **Resting-limit management** (LTF pulse): if `Close` of LTF reaches `C1_EQ` before fill → cancel
-  the limit, notify cancelled. No time-based cancel.
+* **Resting-limit management** (checked on every tick/LTF pulse, `LimitWorking` phase, **and it
+  keeps running after C3 has closed**): if price touches `C1_EQ` (`High>=C1_EQ` for a short /
+  `Low<=C1_EQ` for a long, or the LTF close crosses it) before the limit fills → **cancel the
+  limit and invalidate the setup**, notify cancelled. **No time-based / window-based cancel** —
+  the limit is never cancelled merely because C3 ended.
 * On SL/TP fill (`OnExecutionUpdate`) → close `ActiveTrade`, append ledger, notify result, clear
   the global active-trade lock.
 * **Global single-trade lock**: a static/instance flag blocks any slot from arming while
