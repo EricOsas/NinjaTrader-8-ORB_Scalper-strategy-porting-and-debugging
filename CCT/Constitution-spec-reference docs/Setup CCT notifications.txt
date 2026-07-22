@@ -1,0 +1,28 @@
+8858207904:AAHJhrVd8Pd8ojATgYGPWtZcuvmUt4M5baY
+
+https://discord.gg/P4SPJnke3
+
+https://api.telegram.org/bot<8858207904:AAHJhrVd8Pd8ojATgYGPWtZcuvmUt4M5baY>/getUpdates
+
+
+Telegram Gold chat/topic    = -1003924455348|4
+Telegram Silver chat/topic  = -1003924455348|2
+Telegram NQ chat/topic      = -1003924455348|10
+Telegram AUDUSD chat/topic  = -1003924455348|8
+Telegram BTCUSD chat/topic  = -1003924455348|6
+Telegram Default chat/topic = 8164391652
+
+In MT5:
+
+Tools
+→ Options
+→ Expert Advisors
+→ Allow WebRequest for listed URL
+
+Add each URL on its own line:
+
+https://discord.com
+https://discordapp.com
+https://api.telegram.org
+
+Then restart/reload the EA only on the chart you want to test. Avoid reloading your live terminals while trades are active.
