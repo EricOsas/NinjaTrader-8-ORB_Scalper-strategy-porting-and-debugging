@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "mql5-docs-research": {
+      "source": "tmaru-eng/strategy-bricks",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/mql5-docs-research/SKILL.md",
+      "computedHash": "30cc07f0ffd4576eb59988cd4311cbcab18cc10dd449e36945daf3b8529e0f88"
+    },
+    "mql5-indicator-patterns": {
+      "source": "terrylica/cc-skills",
+      "sourceType": "github",
+      "skillPath": "plugins/mql5/skills/mql5-indicator-patterns/SKILL.md",
+      "computedHash": "964a837c1fe01bb45487044e41c591456e193fe1fed3ccd98161a7387380db68"
+    },
+    "mql5-x-compile": {
+      "source": "tmaru-eng/strategy-bricks",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/mql5-x-compile/SKILL.md",
+      "computedHash": "73aee9ef16f68a2981ae5878a849bf11c8ffaff77beb57c1775bbcfbcd00befa"
+    }
+  }
+}
