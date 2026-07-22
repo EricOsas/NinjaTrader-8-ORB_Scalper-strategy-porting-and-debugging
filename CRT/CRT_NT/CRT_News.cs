@@ -1,0 +1,281 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+
+namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
+{
+    public enum NewsGuardMode
+    {
+        Off = 0,
+        RedOnly = 1,
+        RedAndOrange = 2,
+        All = 3
+    }
+
+    public class NewsEvent
+    {
+        public DateTime TimeUTC { get; set; }
+        public string Currency { get; set; }
+        public string Impact { get; set; }
+        public string Title { get; set; }
+    }
+
+    public class CRT_News
+    {
+        // Swapped atomically after each successful parse — readers grab the
+        // reference once and iterate their own snapshot (no locking needed).
+        private volatile List<NewsEvent> events = new List<NewsEvent>();
+        private DateTime lastFetchedUTC = DateTime.MinValue;
+        private int fetchInFlight = 0; // 0 = idle, 1 = background fetch running
+        private string cacheFilePath;
+        private string historicalCsvPath;
+        private bool isHistoricalMode;
+
+        private static readonly HttpClient http = new HttpClient();
+        private const string FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json";
+
+        public CRT_News(string historicalCsvPath, string cacheFilePath, bool isHistoricalMode)
+        {
+            this.historicalCsvPath = historicalCsvPath;
+            this.cacheFilePath = cacheFilePath;
+            this.isHistoricalMode = isHistoricalMode;
+        }
+
+        //----------------------------------------------------------------------
+        // Public entry point — call from State.DataLoaded or OnBarUpdate
+        //----------------------------------------------------------------------
+        public void Initialize()
+        {
+            if (isHistoricalMode)
+            {
+                LoadHistoricalCsv();
+            }
+            else
+            {
+                // Load cache synchronously so events exist immediately, then
+                // refresh from the live feed in the background.
+                LoadCacheFile();
+                BeginFetchLiveFeed();
+            }
+        }
+
+        public void RefreshIfNeeded(DateTime currentUTC)
+        {
+            if (isHistoricalMode) return; // Static, no refresh needed
+
+            // Re-fetch once per UTC day, and hourly retry if the last fetch never succeeded
+            bool staleDay = currentUTC.Date > lastFetchedUTC.Date;
+            bool neverLoaded = lastFetchedUTC == DateTime.MinValue && (currentUTC - lastAttemptUTC).TotalMinutes >= 60;
+            if (staleDay || neverLoaded)
+                BeginFetchLiveFeed();
+        }
+
+        private DateTime lastAttemptUTC = DateTime.MinValue;
+
+        //----------------------------------------------------------------------
+        // Live FF JSON feed — fetched on a background task so the strategy /
+        // timer thread is never blocked by a WebRequest.
+        //----------------------------------------------------------------------
+        private void BeginFetchLiveFeed()
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref fetchInFlight, 1, 0) != 0)
+                return; // A fetch is already running
+
+            lastAttemptUTC = DateTime.UtcNow;
+            Task.Run(() =>
+            {
+                try
+                {
+                    string json = http.GetStringAsync(FF_URL).GetAwaiter().GetResult();
+                    ParseFFJson(json);
+                    lastFetchedUTC = DateTime.UtcNow;
+
+                    // Write to local cache
+                    try
+                    {
+                        string dir = Path.GetDirectoryName(cacheFilePath);
+                        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                        File.WriteAllText(cacheFilePath, json);
+                    }
+                    catch { /* cache write is best-effort */ }
+                }
+                catch (Exception)
+                {
+                    // Fail safe: fall back to last cached file if we have nothing yet
+                    if (events.Count == 0) LoadCacheFile();
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref fetchInFlight, 0);
+                }
+            });
+        }
+
+        private void LoadCacheFile()
+        {
+            try
+            {
+                if (File.Exists(cacheFilePath))
+                    ParseFFJson(File.ReadAllText(cacheFilePath));
+            }
+            catch { /* no cache — events stay empty (fail safe: don't trade if unknown) */ }
+        }
+
+        private void ParseFFJson(string json)
+        {
+            var parsed = new List<NewsEvent>();
+            // Manual parse: fields: title, country, date, impact, forecast, previous
+            // FF date format: "2026-01-03T13:30:00+00:00"
+            var items = Regex.Matches(json, @"\{[^{}]+\}");
+            foreach (Match item in items)
+            {
+                string block = item.Value;
+                string country = GetJsonField(block, "country");
+                string impact = GetJsonField(block, "impact");
+                if (!country.Equals("USD", StringComparison.OrdinalIgnoreCase)) continue;
+                // Keep ALL impacts — the guard-mode filter (RedOnly /
+                // RedAndOrange / All) is applied at query time.
+
+                string dateStr = GetJsonField(block, "date");
+                string title = GetJsonField(block, "title");
+
+                // FF dates carry an offset ("2026-07-22T08:30:00-04:00") —
+                // parse the FULL string so the offset is honoured, otherwise
+                // every event lands hours off and the blackout windows miss.
+                if (DateTimeOffset.TryParse(dateStr, null,
+                        System.Globalization.DateTimeStyles.None, out DateTimeOffset eventTime))
+                {
+                    parsed.Add(new NewsEvent
+                    {
+                        TimeUTC = eventTime.UtcDateTime,
+                        Currency = country,
+                        Impact = impact,
+                        Title = title
+                    });
+                }
+            }
+            events = parsed; // atomic reference swap
+        }
+
+        private static string GetJsonField(string json, string field)
+        {
+            var match = Regex.Match(json, "\"" + field + "\":\\s*\"([^\"]+)\"");
+            return match.Success ? match.Groups[1].Value : string.Empty;
+        }
+
+        //----------------------------------------------------------------------
+        // Historical CSV feed
+        //----------------------------------------------------------------------
+        private void LoadHistoricalCsv()
+        {
+            var parsed = new List<NewsEvent>();
+            if (!File.Exists(historicalCsvPath)) { events = parsed; return; }
+
+            string[] lines = File.ReadAllLines(historicalCsvPath);
+            for (int i = 1; i < lines.Length; i++) // Skip header
+            {
+                string[] parts = lines[i].Split(',');
+                if (parts.Length < 5) continue;
+
+                // CSV: Date,Time_ET,Currency,Impact,Title
+                string dateStr = parts[0].Trim();
+                string timeStr = parts[1].Trim();
+                string currency = parts[2].Trim();
+                string impact = parts[3].Trim();
+                string title = parts[4].Trim();
+
+                if (!currency.Equals("USD", StringComparison.OrdinalIgnoreCase)) continue;
+                // impact kept for query-time guard-mode filtering
+
+                if (DateTime.TryParse(dateStr + " " + timeStr, out DateTime eventTimeET))
+                {
+                    // Convert ET to UTC
+                    DateTime eventTimeUTC = CRT_Time.NYToUTC(eventTimeET);
+                    parsed.Add(new NewsEvent
+                    {
+                        TimeUTC = eventTimeUTC,
+                        Currency = currency,
+                        Impact = impact,
+                        Title = title
+                    });
+                }
+            }
+            events = parsed; // atomic reference swap
+        }
+
+        //----------------------------------------------------------------------
+        // Query methods — call these from strategy logic.
+        // Each grabs a local snapshot of the (volatile) events reference so a
+        // concurrent background refresh can never invalidate the iteration.
+        //----------------------------------------------------------------------
+        // Guard-mode filter: RedOnly → High; RedAndOrange → High+Medium;
+        // All → everything. (Off is handled by callers — no blocking at all.)
+        private static bool ImpactMatches(NewsGuardMode mode, string impact)
+        {
+            if (mode == NewsGuardMode.All) return true;
+            bool high = string.Equals(impact, "High", StringComparison.OrdinalIgnoreCase);
+            if (mode == NewsGuardMode.RedOnly) return high;
+            return high || string.Equals(impact, "Medium", StringComparison.OrdinalIgnoreCase);
+        }
+
+        public bool IsNewsBlocked(DateTime currentUTC, int blockMinutesBefore, int blockMinutesAfter,
+            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        {
+            if (mode == NewsGuardMode.Off) return false;
+            var snapshot = events;
+            foreach (var ev in snapshot)
+            {
+                if (!ImpactMatches(mode, ev.Impact)) continue;
+                DateTime windowStart = ev.TimeUTC.AddMinutes(-blockMinutesBefore);
+                DateTime windowEnd = ev.TimeUTC.AddMinutes(blockMinutesAfter);
+                if (currentUTC >= windowStart && currentUTC <= windowEnd)
+                    return true;
+            }
+            return false;
+        }
+
+        public bool IsNewsFreezingTrail(DateTime currentUTC, int freezeMinutesBefore, int freezeMinutesAfter,
+            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        {
+            return IsNewsBlocked(currentUTC, freezeMinutesBefore, freezeMinutesAfter, mode);
+        }
+
+        public bool IsNewsFlattening(DateTime currentUTC, int flattenMinutesBefore,
+            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        {
+            return IsNewsBlocked(currentUTC, flattenMinutesBefore, 0, mode);
+        }
+
+        public string GetNextEventDescription(DateTime currentUTC,
+            NewsGuardMode mode = NewsGuardMode.RedOnly)
+        {
+            NewsEvent next = null;
+            TimeSpan shortest = TimeSpan.MaxValue;
+
+            // For display, Off still shows the next red-folder event
+            NewsGuardMode dispMode = mode == NewsGuardMode.Off ? NewsGuardMode.RedOnly : mode;
+            var snapshot = events;
+            foreach (var ev in snapshot)
+            {
+                if (!ImpactMatches(dispMode, ev.Impact)) continue;
+                if (ev.TimeUTC > currentUTC)
+                {
+                    TimeSpan diff = ev.TimeUTC - currentUTC;
+                    if (diff < shortest) { shortest = diff; next = ev; }
+                }
+            }
+
+            if (next == null) return "--";
+            // Hand-format so >24h horizons don't wrap (TimeSpan "hh" is mod-24)
+            int totalSecs = (int)shortest.TotalSeconds;
+            int h = totalSecs / 3600, m = (totalSecs % 3600) / 60, s = totalSecs % 60;
+            return string.Format("{0} in {1:D2}:{2:D2}:{3:D2}", next.Title, h, m, s);
+        }
+    }
+}
