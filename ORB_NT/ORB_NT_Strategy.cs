@@ -202,7 +202,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                         if (ShowVisuals)
                             ORB_Visuals.DrawRangeBox(this, "S" + s + "_RangeBox",
                                 slot.RangeStartTimeUTC.ToLocalTime(), slot.RangeEndTimeUTC.ToLocalTime(),
-                                slot.RangeHigh, slot.RangeLow, Brushes.SteelBlue, Brushes.DarkSlateBlue, true);
+                                slot.RangeHigh, slot.RangeLow, ORB_Visuals.ClrRangeBoxDaily);
                         Print(string.Format("[ORB] {0} HTF range locked: Hi={1:F5} Lo={2:F5}", sessionKey, hi, lo));
                     }
                     else
@@ -231,7 +231,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 {
                     ORB_Visuals.DrawRangeBox(this, "S" + s + "_RangeBox",
                         slot.RangeStartTimeUTC.ToLocalTime(), slot.RangeEndTimeUTC.ToLocalTime(),
-                        slot.RangeHigh, slot.RangeLow, Brushes.DimGray, Brushes.SlateGray, false);
+                        slot.RangeHigh, slot.RangeLow, ORB_Visuals.ClrRangeBoxNY, 20);
                 }
                 return;
             }
@@ -248,7 +248,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 if (ShowVisuals)
                     ORB_Visuals.DrawRangeBox(this, "S" + s + "_RangeBox",
                         slot.RangeStartTimeUTC.ToLocalTime(), slot.RangeEndTimeUTC.ToLocalTime(),
-                        slot.RangeHigh, slot.RangeLow, Brushes.Goldenrod, Brushes.DarkSlateGray, true);
+                        slot.RangeHigh, slot.RangeLow, ORB_Visuals.ClrRangeBoxNY);
                 Print(string.Format("[ORB] {0} Range locked: Hi={1:F5} Lo={2:F5}", slot.SessionKey, slot.RangeHigh, slot.RangeLow));
             }
 
@@ -383,17 +383,35 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 return;
             }
 
-            double currentPrice = Close[0];
-            double thrPts = TrailThresholdPoints * tickSize;
-            double gapPts = TrailGapPoints * tickSize;
+            double bid = GetCurrentBid();
+            double ask = GetCurrentAsk();
 
-            double targetSL = TrailBreakevenOnly
-                ? ORB_Execution.CalculateBreakevenStop(trade.IsLong, currentPrice, trade.EntryPrice, trade.VirtualSL, thrPts, gapPts, tickSize)
-                : ORB_Execution.CalculateTrailingStop(trade.IsLong, currentPrice, trade.EntryPrice, trade.VirtualSL, thrPts, gapPts, tickSize);
+            // Populate the snapshot fields that ComputeTrailTarget needs, using
+            // the flat inputs from the strategy's input properties.
+            trade.SnapBehavior    = TrailBreakevenOnly ? 1 : 2;  // 1=BE-only, 2=full trail; 0=off
+            trade.SnapThreshPrice = TrailThresholdPoints * tickSize;
+            trade.SnapGapPrice    = TrailGapPoints       * tickSize;
+            trade.SnapSpreadComp  = false;
+            trade.SnapTrailMode   = (int)TrailMode.Continuous;
 
-            if (targetSL == trade.VirtualSL) return;
+            // Re-arm to 2 (full) in case TrailBreakevenOnly was flipped off mid-trade.
+            if (!TrailBreakevenOnly && trade.SnapBehavior == 1) trade.SnapBehavior = 2;
 
-            bool sent = ORB_Execution.ApplyTrailingStop(this, trade.SlOrder, trade.IsLong, targetSL, tickSize);
+            double targetSL = ORB_Execution.ComputeTrailTarget(trade, bid, ask, tickSize, DateTime.UtcNow);
+            if (targetSL == 0 || targetSL == trade.VirtualSL) return;
+
+            // Apply: ChangeOrder moves the working stop.  Forward-only guard is
+            // already inside ComputeTrailTarget; double-check here for safety.
+            bool improves = trade.IsLong ? targetSL > trade.VirtualSL : targetSL < trade.VirtualSL;
+            if (!improves) return;
+
+            bool sent = false;
+            try
+            {
+                ChangeOrder(trade.SlOrder, trade.Contracts, 0, targetSL);
+                sent = true;
+            }
+            catch { }
             if (sent)
             {
                 bool firstTrail = !trade.TrailingActivated;
@@ -453,6 +471,19 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
 
         private double GetAccountBalance() => Account.Get(AccountItem.CashValue, Currency.UsDollar);
 
+        // Bid/Ask helpers for trail computation — fall back to Close[0] when
+        // the Instrument hasn't updated the market data yet (e.g. backtester).
+        private double GetCurrentBid()
+        {
+            try { return GetCurrentBid(Instrument); }
+            catch { return Close[0]; }
+        }
+        private double GetCurrentAsk()
+        {
+            try { return GetCurrentAsk(Instrument); }
+            catch { return Close[0]; }
+        }
+
         private string BuildConfigSignature()
         {
             return string.Format("R{0}:RM{1}:REV{2}:LIM{3}:SL{4}:TP{5}:TH{6}:GP{7}:BE{8}:" +
@@ -470,25 +501,57 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             SlotState primary = slots[0];
             ActiveTrade t = activeTrades[0];
 
+            // Compose a human-readable intraday-slots label for the dashboard.
+            var intradayParts = new System.Collections.Generic.List<string>();
+            if (EnableNYSession)     intradayParts.Add("NY");
+            if (EnableLondonSession) intradayParts.Add("London");
+            if (EnableAsianSession)  intradayParts.Add("Asian");
+            string intradayLabel = intradayParts.Count > 0 ? string.Join(" · ", intradayParts) : "--";
+
+            var htfParts = new System.Collections.Generic.List<string>();
+            if (EnableDailyRange)   htfParts.Add("Daily");
+            if (EnableWeeklyRange)  htfParts.Add("Weekly");
+            if (EnableMonthlyRange) htfParts.Add("Monthly");
+            string htfLabel = htfParts.Count > 0 ? string.Join(" · ", htfParts) : "";
+
             var st = new ORBDashState
             {
-                CurrentBalance = GetAccountBalance(),
-                ActiveSession = "NY",
-                SessionPhase = primary.Phase.ToString(),
-                RangeHigh = primary.RangeHigh == double.MinValue ? 0 : primary.RangeHigh,
-                RangeLow = primary.RangeLow == double.MaxValue ? 0 : primary.RangeLow,
-                Slot1Active = primary.IsEnabled,
-                Slot2Active = slots[3].IsEnabled || slots[4].IsEnabled || slots[5].IsEnabled,
-                Slot2Mode = slots[3].IsEnabled ? "Daily" : slots[4].IsEnabled ? "Weekly" : slots[5].IsEnabled ? "Monthly" : "-",
-                InTrade = t != null,
-                TradeDir = t != null ? (t.IsLong ? "LONG" : "SHORT") : "",
-                EntryPrice = t?.EntryPrice ?? 0,
-                StopLoss = t?.VirtualSL ?? 0,
-                ContractCount = t?.Contracts ?? 0,
-                BEActive = t?.TrailingActivated ?? false,
-                SecsToNextPhase = (int)(primary.CutoffTimeUTC - nowUTC).TotalSeconds
+                CurrentBalance    = GetAccountBalance(),
+                ActiveSession     = intradayLabel,
+                SessionPhase      = primary.Phase.ToString(),
+                NYClock           = ORB_Time.UTCToNY(nowUTC).ToString("HH:mm:ss"),
+                SessionCountdownLabel = "Cutoff",
+                SecsToNextPhase   = primary.CutoffTimeUTC > nowUTC
+                                        ? (int)(primary.CutoffTimeUTC - nowUTC).TotalSeconds : 0,
+                RangeHigh         = primary.RangeHigh == double.MinValue ? 0 : primary.RangeHigh,
+                RangeLow          = primary.RangeLow  == double.MaxValue ? 0 : primary.RangeLow,
+                SlotsIntraday     = intradayLabel,
+                SlotsHtf          = htfLabel,
+                InTrade           = t != null,
+                TradeDir          = t != null ? (t.IsLong ? "LONG" : "SHORT") : "",
+                EntryPrice        = t?.EntryPrice  ?? 0,
+                StopLoss          = t?.VirtualSL   ?? 0,
+                TakeProfit        = t?.TpOrder != null ? (t.TpOrder.LimitPrice > 0 ? t.TpOrder.LimitPrice : 0) : 0,
+                ContractCount     = t?.Contracts   ?? 0,
+                ContractMode      = ContractMode.ToString(),
+                BEActive          = t?.TrailingActivated ?? false,
+                InstrumentName    = Instrument.FullName,
+                TickSize          = tickSize,
+                PointValue        = pointValue
             };
-            ORB_Dashboard.Render(this, st);
+
+            // Publish then trigger OnRender via chart invalidation — the actual
+            // Direct2D draw happens in OnRender (see override below).
+            ORB_Dashboard.Publish(this, st);
+        }
+
+        public override void OnRenderTargetChanged() { }
+
+        protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+        {
+            base.OnRender(chartControl, chartScale);
+            if (ShowDashboard)
+                ORB_Dashboard.Render(this, chartControl, RenderTarget);
         }
     }
 }
