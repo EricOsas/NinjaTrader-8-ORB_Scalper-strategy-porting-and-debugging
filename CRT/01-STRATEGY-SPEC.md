@@ -12,7 +12,8 @@ signal engine and how it is wired into that proven infrastructure.
 
 > **Scope note (explicit exclusions).** This build **does NOT** include: trailing-stop logic,
 > break-even logic, EMA / volatility / trend filters, or OCO bracket logic. Stops and targets
-> are static per trade (SL just past the sweep wick, TP at C1 equilibrium). Everything else —
+> are static per trade (SL fixed at the C2 manipulation-candle extreme, TP at C1 equilibrium).
+> Everything else —
 > News filter, Discord/Telegram notifications, position sizing, time engine, dashboard, visuals,
 > state persistence — **is** included.
 
@@ -263,8 +264,8 @@ satisfied (in C2 — provisionally, carried over — or in C3), determine the en
 
 ### 6.2 Market vs 1:1 limit (decision at C3 open)
 
-Let `risk = |entry − SL|` where SL is just past the sweep wick (§7), and
-`reward = |C1_EQ − entry|`. Evaluate at the C2-close / C3-open boundary:
+Let `risk = |entry − SL|` where SL is fixed at the C2 extreme (§7 — `C2_High`/`C2_Low` ±
+buffer), and `reward = |C1_EQ − entry|`. Evaluate at the C2-close / C3-open boundary:
 
 * **Market path — `reward ≥ risk` (≥ 1:1 available immediately):** If C2 achieved CISD, closed
   back inside C1 without reaching `C1_EQ`, and the TP at `C1_EQ` is at least 1:1 versus the sweep
@@ -299,10 +300,17 @@ and drawn*, but cannot place orders until the active trade/limit resolves.
 * **Position sizing / contracts / lots / margin caps** — lifted verbatim from ORB (`ORB_Risk` /
   MT5 position sizer): risk-% of balance, margin-usage cap, Micro/Mini contract caps (C#),
   broker lot constraints (MT5).
-* **Stop Loss:** placed just **past the sweep wick** (the manipulation-leg extreme) plus a small
-  configurable buffer (`SL_BufferPoints`, plus any broker min-stop distance on MT5). For a short:
-  above the sweep high; for a long: below the sweep low.
-* **Take Profit:** `C1_EQ` (50% of C1). Single fixed target.
+* **Stop Loss (fixed at the C2 extreme):** the SL is **always anchored to the extreme of C2, the
+  manipulation candle** — the farthest price C2 reached before closing back inside C1's range. This
+  is identical to "just past the sweep wick," because the sweep wick *is* the C2 extreme.
+  * For a **short** (C2 swept C1_High): `SL = C2_High + SL_BufferPoints` (plus any broker min-stop
+    distance on MT5), where `C2_High` is the highest point the manipulation candle reached.
+  * For a **long** (C2 swept C1_Low): `SL = C2_Low − SL_BufferPoints`, where `C2_Low` is the
+    lowest point the manipulation candle reached.
+  * **The SL is its own independent quantity.** It is **NOT** part of, and does **NOT** affect, the
+    50% calculation. The 50% level is strictly `C1_EQ = (C1_High + C1_Low)/2`, derived from **C1
+    only**. SL is used solely for risk sizing and the 1:1 limit-price geometry (§6.2).
+* **Take Profit:** `C1_EQ` (50% of C1), computed from C1 alone. Single fixed target.
 * **Minimum RR:** `MinRR` default **1:1** (§6.2 enforces it via the limit mechanism). If the
   broker min-stop / spread makes the 1:1 SL un-placeable, **skip the trade**.
 * **No trailing, no break-even, no OCO** (explicit exclusion).

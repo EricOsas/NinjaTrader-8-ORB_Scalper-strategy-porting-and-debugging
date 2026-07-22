@@ -25,7 +25,7 @@ Folder: `CRT/CRT_MT5/`. Main EA: `CRT_EA.mq5` including the `.mqh` modules below
 | `CRT_Structure.mqh` | Per-slot C1→C2→C3 tracking, sweep detect, close-back-inside bias, 50% guard. | new |
 | `CRT_Confirm.mqh` | LTF CISD + FVG/IFVG detection over `CopyRates` LTF series. | CCT scanner patterns |
 | `CRT_HourFilter.mqh` | CSV NY-hour parse + `IsExecHourAllowed`. | **CCT `AppendHourSlots`/`HasHour`** |
-| `CRT_Execution.mqh` | Market entry / 1:1 limit / SL(=sweep wick) / TP(=C1_EQ); resting-limit cancel. | ORB/CCT execution trimmed |
+| `CRT_Execution.mqh` | Market entry / 1:1 limit / SL(=C2 extreme) / TP(=C1_EQ); persistent-limit + 50% invalidation. | ORB/CCT execution trimmed |
 | `CRT_News.mqh` | FF calendar (WebRequest live + cache + historical CSV), guard modes, blackout. | ORB_Scalper news |
 | `CRT_Notify.mqh` | Discord/Telegram queue, retry, dedupe (`ClaimOnce`), CRT helpers. | **CCT_Notify.mqh** |
 | `CRT_Dashboard.mqh` | On-chart dashboard panel with CRT fields. | **CCT_Dashboard.mqh repurposed** |
@@ -73,8 +73,10 @@ Same procedural logic as `02-NT8-IMPLEMENTATION.md` §3–§4, expressed over `M
 * **C2 never executes; execution is only ever in C3.** The market-entry decision is anchored at
   the C2-close / C3-open boundary. A CISD/IFVG achieved in C2 is provisional and carries over
   (strategy spec §1.2, §6.3); the sweep must have occurred in C2.
-* `risk = |entryRef − sl|` (sl = sweep extreme ± `SL_BufferPoints`, respect
-  `SYMBOL_TRADE_STOPS_LEVEL`), `reward = |C1_EQ − entryRef|`.
+* `risk = |entryRef − sl|` where `sl` is **fixed at the C2 (manipulation-candle) extreme**:
+  `sl = C2_High + SL_BufferPoints` (short) or `C2_Low − SL_BufferPoints` (long), respecting
+  `SYMBOL_TRADE_STOPS_LEVEL`. `reward = |C1_EQ − entryRef|`. **SL is independent of the 50% calc**
+  — `C1_EQ` is derived from C1 only and never uses the SL.
 * 50% guard: skip if price already at `C1_EQ` at the decision moment.
 * `reward ≥ risk` → `OrderSend` **market** at C3 open; else `OrderSend`
   **BuyLimit/SellLimit** at `(C1_EQ + sl)/2` (equivalently `C1_EQ ∓ risk`) so the entry is
@@ -83,8 +85,8 @@ Same procedural logic as `02-NT8-IMPLEMENTATION.md` §3–§4, expressed over `M
   every tick (including after C3 has closed) check the 50% level: if price **touches `C1_EQ`
   before the pending fills → delete the pending order and invalidate the whole setup**. There is
   **no time-based / window-based cancel**.
-* On fill: set position SL (sweep wick) and TP (`C1_EQ`) — plain SL/TP on the position, **no OCO,
-  no trailing**.
+* On fill: set position SL (C2 extreme ± buffer) and TP (`C1_EQ`) — plain SL/TP on the position,
+  **no OCO, no trailing**.
 * Lots via `CRT_Risk.mqh` (risk-% / margin cap / broker clamp). Skip trade if 1:1 SL is inside
   stops-level/spread.
 * Global single-active-trade lock across all slots (live position or working pending).

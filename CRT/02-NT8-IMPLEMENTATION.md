@@ -119,7 +119,8 @@ began. Provides:
   below**; long: a bearish FVG whose far boundary (candle1.Low) is **closed above**.
 * **`Confirmed(model, ...)`** — combines per `EntryTriggerModel`: CISD, IFVG, or both.
 
-Returns the confirming candle's close price + the manipulation-leg extreme (for SL).
+Returns the confirming candle's close price + the **C2 manipulation-candle extreme**
+(`C2_High`/`C2_Low`) used verbatim as the fixed SL anchor (§5). The SL never feeds the 50% calc.
 
 ---
 
@@ -128,11 +129,14 @@ Returns the confirming candle's close price + the manipulation-leg extreme (for 
 No OCO, no trailing. Given a confirmed setup:
 
 ```
-risk   = |entryRef - slPrice|          // slPrice = sweep extreme ± SL_BufferPoints (rounded to tick)
+// slPrice is FIXED at the C2 (manipulation-candle) extreme, independent of the 50% calc:
+//   short: slPrice = C2_High + SL_BufferPoints ; long: slPrice = C2_Low - SL_BufferPoints (round to tick)
+// C1_EQ is derived from C1 only and never uses slPrice.
+risk   = |entryRef - slPrice|
 reward = |C1_EQ - entryRef|
-if (priceAlreadyAtEQ) skip;            // 50% guard
-if (reward >= risk)  -> SubmitOrderUnmanaged(Market)          // enter now / at C3 open
-else                 -> SubmitOrderUnmanaged(Limit @ C1_EQ ∓ risk)  // 1:1 limit
+if (priceAlreadyAtEQ) skip;            // 50% guard (execution only ever at C3; C2 never fills)
+if (reward >= risk)  -> SubmitOrderUnmanaged(Market)          // market at C2-close / C3-open boundary
+else                 -> SubmitOrderUnmanaged(Limit @ (C1_EQ + slPrice)/2)  // 1:1 limit; persists past C3 close
 ```
 
 * On entry fill (`OnOrderUpdate` Filled) → submit **SL** (StopMarket) and **TP** (Limit @ C1_EQ)
