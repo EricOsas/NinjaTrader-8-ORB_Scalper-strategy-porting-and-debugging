@@ -288,6 +288,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         private bool adoptionDone = false;
         private bool wasRealtime = false;   // persistence only for live sessions (never backtests)
         private bool isAnalyzer = false;    // Strategy Analyzer run (never transitions to Realtime)
+        private bool isSimOrPlayback = false; // Sim101 / Playback / Replay account — NOT broker-executed
 
         private static readonly string[] SlotNames = { "NY", "London", "Asian", "Daily", "Weekly", "Monthly" };
 
@@ -336,6 +337,18 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 // arrows and the fake eval numbers).
                 try { isAnalyzer = Account != null && Account.Name != null && Account.Name.StartsWith("Backtest"); }
                 catch { isAnalyzer = false; }
+                // Sim101 / Playback / Replay accounts reach State.Realtime (so the
+                // wasRealtime gate alone lets them through) but are NOT genuine
+                // broker fills — they must never feed Eval Profit / consistency /
+                // fast-trade / traded-day trackers or the on-disk REAL ledger.
+                try
+                {
+                    string an = Account != null && Account.Name != null ? Account.Name : "";
+                    isSimOrPlayback = an == "Sim101"
+                        || an.StartsWith("Backtest") || an.StartsWith("Playback")
+                        || an.StartsWith("Replay") || an.StartsWith("Sim");
+                }
+                catch { isSimOrPlayback = false; }
                 InitModules();
             }
             else if (State == State.Realtime)
@@ -478,6 +491,11 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             var seenDays = new HashSet<DateTime>();
             foreach (var t in ledger)
             {
+                // Any prior trade (real, legacy, or sim) for a session means that
+                // session already resolved — suppress its synthetic preview so a
+                // restart can't redraw a synthetic over a session that traded.
+                if (!string.IsNullOrEmpty(t.SessionKey)) resolvedSessionKeys.Add(t.SessionKey);
+
                 // Eval Profit / consistency / fast-trade / traded-days count ONLY
                 // genuinely broker-executed trades. Legacy rows (pre-Source column)
                 // and any sim rows are skipped so historical simulations can never
@@ -820,6 +838,21 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
         // Resolved synthetics are final — draw and log once, never re-simulate.
         private readonly HashSet<string> syntheticFinal = new HashSet<string>();
 
+        // Every SessionKey that has EVER produced a real (broker-executed) trade,
+        // active OR already closed. Seeded from the on-disk ledger at startup and
+        // appended on every close. The synthetic-preview simulator gates on THIS
+        // (not the live activeTrade reference) so a resolved session can never be
+        // redrawn as a synthetic after its real trade closed and nulled the slot
+        // — the "duplicate broker + synthetic execution object" bug.
+        private readonly HashSet<string> resolvedSessionKeys = new HashSet<string>();
+
+        // Trail modify debounce: never re-send a stop modify faster than this,
+        // and never while one is still in flight (see ActiveTrade.ModifyInFlight).
+        private const double MinModifyIntervalMs = 150.0;
+        // If a submitted modify never confirms Working within this window, treat
+        // it as lost and allow a resend so the trail can never freeze permanently.
+        private const double ModifyInFlightTimeoutMs = 2000.0;
+
         // Bar-by-bar forward simulation with full trail derivation.
         // Bid/ask are approximated by bar H/L (conservative: within a bar,
         // adverse extreme is applied to the stop BEFORE the favorable extreme
@@ -837,6 +870,19 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             // Resolved once = final forever (no re-sim, no re-log, no redraw)
             string finalKey = slot.SessionKey + "|" + (highSide ? "H" : "L");
             if (syntheticFinal.Contains(finalKey)) return;
+
+            // Ledger-backed gate (MT5 SimulateSyntheticExecutions parity): if this
+            // SessionKey EVER produced a real trade — active OR already closed —
+            // never draw a synthetic for it. This deliberately does NOT look at the
+            // live activeTrades[] reference, so it still holds after the real trade
+            // closes and nulls the slot (the 24s-later synthetic redraw bug). Any
+            // lingering _SYN_ object is removed here as belt-and-suspenders.
+            if (!string.IsNullOrEmpty(slot.SessionKey) && resolvedSessionKeys.Contains(slot.SessionKey))
+            {
+                ORB_Visuals.ClearAllVisuals(this, "S" + s + "_SYN_" + (highSide ? "H" : "L"));
+                syntheticFinal.Add(finalKey);
+                return;
+            }
 
             // Validity window: the first-touch must fall INSIDE this session's
             // own window (range end → cutoff). Anything else is a stale touch
@@ -1572,6 +1618,25 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             int quantity, int filled, double averageFillPrice,
             OrderState orderState, DateTime time, ErrorCode error, string nativeError)
         {
+            // Trail debounce release: the instant a tracked protective stop reports
+            // back Working (or Accepted), its modify has landed at the broker, so we
+            // allow the next trail move. Clearing on ANY other state (ChangeSubmitted,
+            // CancelSubmitted, ...) would let a second modify race the first — the
+            // exact overlapping-modify churn that caused the stale-stop leak.
+            if ((orderState == OrderState.Working || orderState == OrderState.Accepted)
+                && error == ErrorCode.NoError && activeTrades != null)
+            {
+                for (int i = 0; i < SLOT_COUNT; i++)
+                {
+                    var at = activeTrades[i];
+                    if (at != null && at.ModifyInFlight && ReferenceEquals(at.SlOrder, order))
+                    {
+                        at.ModifyInFlight = false;
+                        break;
+                    }
+                }
+            }
+
             if (error == ErrorCode.NoError && orderState != OrderState.Rejected) return;
 
             if (orderState == OrderState.Rejected)
@@ -1759,6 +1824,10 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 ORB_Visuals.ClearAllVisuals(this, "S" + s + "_SYN_L");
                 syntheticFinal.Add(slots[s].SessionKey + "|H");
                 syntheticFinal.Add(slots[s].SessionKey + "|L");
+                // Persistent gate: this session is now resolved for the whole
+                // run, so the retro simulator won't redraw it once the slot nulls.
+                if (!string.IsNullOrEmpty(slots[s].SessionKey))
+                    resolvedSessionKeys.Add(slots[s].SessionKey);
                 // (trade tool is drawn by the 1s visual pulse from here on)
 
                 notifier?.NotifyFill(ocoCounter, trade.SessionKey, isLong, fillPx, slPx, tpPx, filledQty);
@@ -1829,11 +1898,16 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
 
             double holdSecs = (closeUTC - trade.EntryTime).TotalSeconds;
 
+            // This session has now produced a resolved trade — suppress any
+            // future synthetic preview for it (survives the slot being nulled).
+            if (!string.IsNullOrEmpty(trade.SessionKey)) resolvedSessionKeys.Add(trade.SessionKey);
+
             // BROKER-BACKED ONLY: the trackers feeding the dashboard (eval
             // profit, consistency, quick-trades, traded days) count REAL
-            // executions exclusively. Historical-backfill / Strategy Analyzer
-            // simulations were leaking in here and showing phantom eval PnL.
-            if (wasRealtime)
+            // executions exclusively. Historical backfill, Strategy Analyzer,
+            // AND Sim101 / Playback / Replay accounts (which DO reach
+            // State.Realtime) were leaking in here and showing phantom eval PnL.
+            if (wasRealtime && !isSimOrPlayback)
             {
                 consistencyTracker.RecordTrade(closeUTC.Date, pnl);
                 fastTradeTracker.RecordTrade(holdSecs, pnl);
@@ -1846,7 +1920,7 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 }
             }
 
-            if (wasRealtime) // backtests must not pollute the live ledger
+            if (wasRealtime && !isSimOrPlayback) // backtests AND sim/playback must not pollute the live ledger
                 state.AppendClosedTrade(new LedgerTrade
                 {
                     EntryTimeUTC = trade.EntryTime,
@@ -1918,6 +1992,21 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
             double newSL = ORB_Execution.ComputeTrailTarget(trade, bid, ask, TickSize, currentUTC);
             if (newSL <= 0) return;
 
+            // ── Modify debounce (fixes the self-inflicted trailed-exit leak) ──
+            // Without this, a "better" target every tick fires a fresh ChangeOrder
+            // while the previous one is still resolving, so the resting stop never
+            // settles and lands several ticks stale when price finally hits it.
+            if (trade.ModifyInFlight)
+            {
+                // Still waiting on a prior modify to confirm Working — but never
+                // wait forever: a lost confirmation must not freeze the trail.
+                if ((currentUTC - trade.LastModifyAttempt).TotalMilliseconds < ModifyInFlightTimeoutMs)
+                    return;
+                trade.ModifyInFlight = false; // stale in-flight modify → allow resend
+            }
+            if ((currentUTC - trade.LastModifyAttempt).TotalMilliseconds < MinModifyIntervalMs)
+                return; // rate-cap: at most one trail modify per MinModifyIntervalMs
+
             if (trade.SlOrder.OrderState == OrderState.Working || trade.SlOrder.OrderState == OrderState.Accepted)
             {
                 double newStop = Instrument.MasterInstrument.RoundToTickSize(newSL);
@@ -1925,6 +2014,10 @@ namespace NinjaTrader.NinjaScript.Strategies.ORB_NT
                 // stale limit blocks the fill. limit=0 keeps a plain StopMarket.
                 double newLimit = ORB_Execution.SlLimitPrice(trade.IsLong, newStop,
                     SlipCapPoints(trade), Instrument.MasterInstrument);
+                // Mark in-flight BEFORE submitting: OnOrderUpdate clears this the
+                // moment THIS stop reports back Working (confirmed live at broker).
+                trade.LastModifyAttempt = currentUTC;
+                trade.ModifyInFlight = true;
                 ChangeOrder(trade.SlOrder, trade.SlOrder.Quantity, newLimit, newStop);
                 bool firstTrail = !trade.TrailingActivated;
                 trade.VirtualSL = newSL;
