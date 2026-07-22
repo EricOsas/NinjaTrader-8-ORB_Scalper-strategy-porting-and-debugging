@@ -1,8 +1,11 @@
 #region Using declarations
 using System;
 using System.Windows.Media;
+using NinjaTrader.Gui;
+using NinjaTrader.Gui.Tools;
 using NinjaTrader.NinjaScript;
 using NinjaTrader.NinjaScript.DrawingTools;
+using NinjaTrader.NinjaScript.Strategies;
 #endregion
 
 // CRT_NT — chart visuals. Thin wrapper over NinjaTrader Draw.* so the strategy
@@ -14,14 +17,19 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
         private const string P = "CRT_";
 
         // Draw the C1 range box (the "candle range" / dealing range).
+        // Uses barsAgo overload so no DateTime conversion is needed here.
         public static void DrawRangeBox(Strategy s, int c1StartBarsAgo, int c1EndBarsAgo,
             double hi, double lo, bool bullishBias)
         {
             if (s == null) return;
             string tag = P + "range_" + s.CurrentBars[0];
             Brush area = bullishBias ? Brushes.SeaGreen : Brushes.IndianRed;
-            s.Draw.Rectangle(s, tag, false, c1StartBarsAgo, hi, c1EndBarsAgo, lo,
-                Brushes.DimGray, area, 12);
+            try
+            {
+                Draw.Rectangle(s, tag, false, c1StartBarsAgo, hi, c1EndBarsAgo, lo,
+                    Brushes.Transparent, area, 12);
+            }
+            catch { }
         }
 
         // Mark the manipulation sweep (the wick that took liquidity beyond C1).
@@ -29,10 +37,14 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
         {
             if (s == null) return;
             string tag = P + "sweep_" + s.CurrentBars[0];
-            if (sweepHigh)
-                s.Draw.ArrowDown(s, tag, false, barsAgo, price, Brushes.Orange);
-            else
-                s.Draw.ArrowUp(s, tag, false, barsAgo, price, Brushes.Orange);
+            try
+            {
+                if (sweepHigh)
+                    Draw.ArrowDown(s, tag, false, barsAgo, price, Brushes.Orange);
+                else
+                    Draw.ArrowUp(s, tag, false, barsAgo, price, Brushes.Orange);
+            }
+            catch { }
         }
 
         // Draw the FVG / IFVG confirmation zone.
@@ -42,8 +54,12 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             if (s == null) return;
             string tag = P + (inverted ? "ifvg_" : "fvg_") + s.CurrentBars[0];
             Brush fill = inverted ? Brushes.MediumPurple : Brushes.SteelBlue;
-            s.Draw.Rectangle(s, tag, false, startBarsAgo, top, endBarsAgo, bottom,
-                Brushes.Transparent, fill, 25);
+            try
+            {
+                Draw.Rectangle(s, tag, false, startBarsAgo, top, endBarsAgo, bottom,
+                    Brushes.Transparent, fill, 25);
+            }
+            catch { }
         }
 
         // Entry / SL / TP lines for a trade. Keyed by 'key' (the lane session
@@ -52,9 +68,13 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
         {
             if (s == null) return;
             string k = Safe(key);
-            s.Draw.HorizontalLine(s, P + "entry_" + k, entry, Brushes.Gold, DashStyleHelper.Solid, 1);
-            s.Draw.HorizontalLine(s, P + "sl_" + k, sl, Brushes.IndianRed, DashStyleHelper.Dash, 1);
-            s.Draw.HorizontalLine(s, P + "tp_" + k, tp, Brushes.SeaGreen, DashStyleHelper.Dash, 1);
+            try
+            {
+                Draw.HorizontalLine(s, P + "entry_" + k, false, entry, Brushes.Gold, DashStyleHelper.Solid, 1);
+                Draw.HorizontalLine(s, P + "sl_"    + k, false, sl,    Brushes.IndianRed,  DashStyleHelper.Dash, 1);
+                Draw.HorizontalLine(s, P + "tp_"    + k, false, tp,    Brushes.SeaGreen,   DashStyleHelper.Dash, 1);
+            }
+            catch { }
         }
 
         public static void ClearTradeLevels(Strategy s, string key)

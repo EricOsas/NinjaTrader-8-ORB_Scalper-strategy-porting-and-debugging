@@ -177,7 +177,12 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             string key = SessionKeyFor(c1.T);
             if (stateStore != null && stateStore.IsConsumed(key)) return;
 
-            CRT_Structure.LockC1(setup, c1, key);
+            // LockC1 needs the candle immediately before C1 for the optional
+            // displacement filter.  CurrentBars[HTF] >= 2 is guaranteed by the
+            // BarsRequiredToTrade == 2 guard at the top of OnBarUpdate.
+            var prev = new Candle(
+                Times[HTF][1], Opens[HTF][1], Highs[HTF][1], Lows[HTF][1], Closes[HTF][1]);
+            CRT_Structure.LockC1(setup, c1, prev, key);
             confirm.Reset();
             htfClosesSinceC1 = 0;
             sweepStartUTC = DateTime.MinValue;
@@ -317,7 +322,7 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
 
             // News block — no new entries inside a blackout window.
             if (EnableNews && news != null &&
-                news.IsNewsBlocked(DateTime.UtcNow, NewsBeforeMin, NewsAfterMin, true, false, false))
+                news.IsNewsBlocked(DateTime.UtcNow, NewsBeforeMin, NewsAfterMin, NewsGuardMode.RedOnly))
             { CompleteSetup("news blackout"); return; }
 
             // Daily risk guards.
@@ -361,7 +366,7 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             };
 
             if (DrawVisuals)
-                CRT_Visuals.DrawTradeLevels(this, plan.EntryRef, plan.SlPrice, plan.TpPrice);
+                CRT_Visuals.DrawTradeLevels(this, setup.SessionKey, plan.EntryRef, plan.SlPrice, plan.TpPrice);
         }
 
         //==================================================================
@@ -429,7 +434,10 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
                 });
 
             if (notify != null)
-                notify.NotifyResult(0, activeTrade.SessionKey, activeTrade.IsLong, pnl, 0, tpHit ? "TP" : "SL");
+                notify.NotifyResult(0, activeTrade.SessionKey, activeTrade.IsLong, pnl,
+                    activeTrade.EntryPrice, price,
+                    CRT_Slots.TfLabel(activeSlot, activeTf),
+                    AccountBalance());
 
             // Cancel the sibling protective order, if still working.
             CancelSibling(tpHit ? activeTrade.SlOrder : activeTrade.TpOrder);
@@ -473,13 +481,15 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             if (stateStore != null && setup.C1Locked)
                 stateStore.MarkConsumed(setup.SessionKey);
 
+            if (DrawVisuals && !string.IsNullOrEmpty(setup.SessionKey))
+                CRT_Visuals.ClearTradeLevels(this, setup.SessionKey);
+
             setup.Phase = SetupPhase.WaitC1;
             setup.C1Locked = false;
             setup.ResetSweepScan();
             confirm.Reset();
             htfClosesSinceC1 = 0;
             sweepStartUTC = DateTime.MinValue;
-            if (DrawVisuals) CRT_Visuals.ClearTradeLevels(this);
         }
 
         //==================================================================
