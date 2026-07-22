@@ -88,6 +88,21 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
 
         public string SessionKey = "";  // slot + C1 time (identity)
 
+        // Per-setup sweep-scan start (UTC). Gates "FVG born during/after the
+        // sweep" for IFVG detection. Rolling model → one value per lane.
+        public DateTime SweepStartUTC = DateTime.MinValue;
+
+        // Optional C1 displacement filter, evaluated at C1 lock against the
+        // prior HTF candle. A bearish setup needs C2 to sweep C1_High then close
+        // back inside; if C1 ITSELF closed ABOVE the prior candle's high there is
+        // a bullish gap/displacement → C1 is invalid for shorts. Mirror for longs.
+        public bool C1ValidBearish = true;   // false if C1 closed above prev high
+        public bool C1ValidBullish = true;   // false if C1 closed below prev low
+
+        // Rolling-model bookkeeping.
+        public bool OrderPlaced;   // an entry has been submitted (guard vs double-entry)
+        public bool Dead;          // lane fully complete/invalidated → prune
+
         public void ResetSweepScan()
         {
             SweptHigh = SweptLow = false;
@@ -104,10 +119,12 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             LimitPrice = 0;
             Invalidated = false;
             InvalidReason = "";
+            SweepStartUTC = DateTime.MinValue;
+            OrderPlaced = false;
         }
     }
 
-    // ── Active trade (single, global) ────────────────────────────────────
+    // ── Active trade (one per concurrent lane; positions net at broker) ──
     public class ActiveTrade
     {
         public Order EntryOrder;

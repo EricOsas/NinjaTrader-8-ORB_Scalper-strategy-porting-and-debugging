@@ -8,8 +8,9 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
     //======================================================================
     public static class CRT_Structure
     {
-        // Lock a freshly-closed HTF candle as C1.
-        public static void LockC1(CrtSetup s, Candle c1, string sessionKey)
+        // Lock a freshly-closed HTF candle as C1. 'prev' is the HTF candle
+        // immediately before C1, used for the optional displacement filter.
+        public static void LockC1(CrtSetup s, Candle c1, Candle prev, string sessionKey)
         {
             s.C1Time = c1.T;
             s.C1High = c1.H;
@@ -18,7 +19,23 @@ namespace NinjaTrader.NinjaScript.Strategies.CRT_NT
             s.C1Locked = true;
             s.SessionKey = sessionKey;
             s.ResetSweepScan();
+
+            // Directional displacement validity vs the prior candle:
+            //   C1 closed ABOVE prev.High → bullish gap → invalid for SHORTS.
+            //   C1 closed BELOW prev.Low  → bearish gap → invalid for LONGS.
+            s.C1ValidBearish = !(c1.C > prev.H);
+            s.C1ValidBullish = !(c1.C < prev.L);
+
             s.Phase = SetupPhase.C2Watch;
+        }
+
+        // Optional C1 displacement filter gate for a resolved bias. Only
+        // consulted by the strategy when the filter input is enabled.
+        public static bool C1FilterAllows(CrtSetup s, TradeBias bias)
+        {
+            if (bias == TradeBias.Short) return s.C1ValidBearish;
+            if (bias == TradeBias.Long)  return s.C1ValidBullish;
+            return false;
         }
 
         // Update the running C2 extreme and sweep flags from a forming LTF bar
